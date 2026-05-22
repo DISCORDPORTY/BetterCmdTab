@@ -12,19 +12,35 @@ final class AppCatalogCache {
     private weak var mru: MRUTracker?
     private var observers: [NSObjectProtocol] = []
     private var periodicTimer: Timer?
-    private let snapshotQueue = DispatchQueue(label: "BetterCmdTab.snapshot", qos: .userInteractive)
+    private var isPanelVisible: Bool = false
+    private var pendingOneShotCompletions: [() -> Void] = []
+    private let snapshotQueue = DispatchQueue(label: "BetterCmdTab.snapshot", qos: .userInteractive, attributes: .concurrent)
+
+    private static let idleRefreshInterval: TimeInterval = 10.0
+    private static let activeRefreshInterval: TimeInterval = 2.5
 
     func start(mru: MRUTracker) {
         self.mru = mru
         installObservers()
         scheduleFullRefresh()
-        let timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+        installTimer(interval: Self.idleRefreshInterval)
+    }
+
+    private func installTimer(interval: TimeInterval) {
+        periodicTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.scheduleFullRefresh()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         periodicTimer = timer
+    }
+
+    func setPanelVisible(_ visible: Bool) {
+        guard visible != isPanelVisible else { return }
+        isPanelVisible = visible
+        installTimer(interval: visible ? Self.activeRefreshInterval : Self.idleRefreshInterval)
     }
 
     func rows(orderedBy mru: [pid_t]) -> [SwitcherRow] {
@@ -60,8 +76,7 @@ final class AppCatalogCache {
                         window: window.ref,
                         windowTitle: window.title,
                         isMinimized: window.isMinimized,
-                        isFullscreen: window.isFullscreen,
-                        tabRef: window.tabRef
+                        isFullscreen: window.isFullscreen
                     ))
                 }
             }
@@ -80,7 +95,8 @@ final class AppCatalogCache {
         return 0
     }
 
-    func scheduleFullRefresh() {
+    func scheduleFullRefresh(completion: (() -> Void)? = nil) {
+        if let completion { pendingOneShotCompletions.append(completion) }
         guard !pendingRefresh else { return }
         pendingRefresh = true
         snapshotQueue.async { [weak self] in
@@ -89,15 +105,9 @@ final class AppCatalogCache {
                 guard let self else { return }
                 self.entries = fresh
                 self.pendingRefresh = false
-            }
-        }
-    }
-
-    func refreshNow() {
-        snapshotQueue.sync {
-            let fresh = Self.computeEntries()
-            DispatchQueue.main.sync {
-                self.entries = fresh
+                let pending = self.pendingOneShotCompletions
+                self.pendingOneShotCompletions.removeAll()
+                for cb in pending { cb() }
             }
         }
     }
@@ -159,6 +169,7 @@ final class AppCatalogCache {
             let pid = app.processIdentifier
             Task { @MainActor [weak self] in
                 self?.entries.removeValue(forKey: pid)
+                IconCache.evict(pid)
             }
         }
         observers.append(terminateObs)

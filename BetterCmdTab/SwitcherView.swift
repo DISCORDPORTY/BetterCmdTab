@@ -4,7 +4,6 @@ import AppKit
 protocol SwitcherViewDelegate: AnyObject {
     func switcherViewDidHover(index: Int)
     func switcherViewDidClick(index: Int)
-    func switcherViewDidStep(dx: Int, dy: Int)
 }
 
 @MainActor
@@ -21,23 +20,18 @@ final class SwitcherView: NSView {
     private var cachedLayout: ListLayout?
     private var trackingArea: NSTrackingArea?
 
-    private var scrollAccumX: CGFloat = 0
-    private var scrollAccumY: CGFloat = 0
-    private let scrollStepThreshold: CGFloat = 14
-
     private var metrics: SwitcherMetrics = .baseline
     let maxScreenHeightFraction: CGFloat = 0.85
 
     override init(frame frameRect: NSRect) {
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()
-            glass.style = .clear
-            Self.setPrivateVariant(glass, value: 3)
+            glass.style = .regular
             glass.cornerRadius = SwitcherMetrics.baseCornerRadius
             glass.wantsLayer = true
             glass.layer?.masksToBounds = true
             glassBackdrop = glass
-            NSLog("[BetterCmdTab] Glass: NSGlassEffectView style=clear variant=3")
+            NSLog("[BetterCmdTab] Glass: NSGlassEffectView style=regular")
         } else {
             let fallback = NSVisualEffectView()
             fallback.material = .hudWindow
@@ -61,15 +55,6 @@ final class SwitcherView: NSView {
         contentContainer.addSubview(listContainer)
     }
 
-    private static func setPrivateVariant(_ glass: NSView, value: Int) {
-        let selector = NSSelectorFromString("set_variant:")
-        guard let method = class_getInstanceMethod(object_getClass(glass), selector) else { return }
-        typealias SetVariantType = @convention(c) (AnyObject, Selector, Int) -> Void
-        let impl = method_getImplementation(method)
-        let fn = unsafeBitCast(impl, to: SetVariantType.self)
-        fn(glass, selector, value)
-    }
-
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
 
     private var highlightPrefix: String = ""
@@ -87,8 +72,6 @@ final class SwitcherView: NSView {
         }
         rebuildItemPool()
         cachedLayout = nil
-        scrollAccumX = 0
-        scrollAccumY = 0
         invalidateIntrinsicContentSize()
         needsLayout = true
         applySelection()
@@ -152,36 +135,6 @@ final class SwitcherView: NSView {
         }
     }
 
-    override func scrollWheel(with event: NSEvent) {
-        if !event.hasPreciseScrollingDeltas {
-            let dx = event.scrollingDeltaX > 0 ? 1 : (event.scrollingDeltaX < 0 ? -1 : 0)
-            let dy = event.scrollingDeltaY > 0 ? -1 : (event.scrollingDeltaY < 0 ? 1 : 0)
-            if dx != 0 || dy != 0 {
-                delegate?.switcherViewDidStep(dx: dx, dy: dy)
-            }
-            return
-        }
-
-        scrollAccumX += event.scrollingDeltaX
-        scrollAccumY += event.scrollingDeltaY
-
-        var dx = 0
-        while scrollAccumX >= scrollStepThreshold { dx += 1; scrollAccumX -= scrollStepThreshold }
-        while scrollAccumX <= -scrollStepThreshold { dx -= 1; scrollAccumX += scrollStepThreshold }
-
-        var dy = 0
-        while scrollAccumY >= scrollStepThreshold { dy -= 1; scrollAccumY -= scrollStepThreshold }
-        while scrollAccumY <= -scrollStepThreshold { dy += 1; scrollAccumY += scrollStepThreshold }
-
-        if event.phase == .ended || event.momentumPhase == .ended {
-            scrollAccumX = 0
-            scrollAccumY = 0
-        }
-
-        if dx != 0 || dy != 0 {
-            delegate?.switcherViewDidStep(dx: dx, dy: dy)
-        }
-    }
 
     private func indexAtWindowPoint(_ pointInWindow: NSPoint) -> Int? {
         let local = convert(pointInWindow, from: nil)

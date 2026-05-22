@@ -34,6 +34,16 @@ final class SwitcherController: SwitcherViewDelegate {
         view = SwitcherView(frame: .zero)
         panel.contentView = view
         view.delegate = self
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.phase == .visible, self.panel.isVisible else { return }
+                self.panel.makeKeyAndOrderFront(nil)
+            }
+        }
     }
 
     func start() {
@@ -87,12 +97,6 @@ final class SwitcherController: SwitcherViewDelegate {
         commit()
     }
 
-    func switcherViewDidStep(dx: Int, dy: Int) {
-        guard phase == .visible, !rows.isEmpty else { return }
-        if dy != 0 { advanceLinearVisible(by: dy, wrap: false) }
-        if dx != 0 { advanceColumn(by: dx) }
-    }
-
     private func handle(_ event: HotkeyTap.Event) {
         switch event {
         case .nextApp:
@@ -112,7 +116,7 @@ final class SwitcherController: SwitcherViewDelegate {
         case .escape:
             cancel()
         case .closeWindow:
-            performOnVisibleTarget { Activator.closeWindow($0) }
+            performCloseAction()
         case .minimizeWindow:
             performOnVisibleTarget { Activator.minimizeWindow($0) }
         case .hideApp:
@@ -299,7 +303,8 @@ final class SwitcherController: SwitcherViewDelegate {
             ? snapshotApps[targetIdx].processIdentifier : nil
 
         let cachedRows = cache.rows(orderedBy: mru.order)
-        if !cachedRows.isEmpty {
+        let hadCachedRows = !cachedRows.isEmpty
+        if hadCachedRows {
             rows = cachedRows
             labels = RowLabels.labels(for: rows)
             if let pid = targetPid, let match = rows.firstIndex(where: { $0.pid == pid }) {
@@ -326,12 +331,24 @@ final class SwitcherController: SwitcherViewDelegate {
         view.configure(rows: rows, labels: labels, selectedIndex: index, metrics: currentMetrics, highlightPrefix: letterBuffer)
         panel.present()
         phase = .visible
+        cache.setPanelVisible(true)
 
-        let mruOrder = mru.order
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            let fresh = AppCatalog.snapshot(orderedBy: mruOrder)
-            DispatchQueue.main.async {
-                self?.applyFullSnapshot(fresh, anchorPid: targetPid)
+        if hadCachedRows {
+            // Cache already fresh — kick a background refresh through the cache
+            // layer (single AX scan, not a duplicate) and re-apply when ready.
+            cache.scheduleFullRefresh { [weak self] in
+                guard let self else { return }
+                let fresh = self.cache.rows(orderedBy: self.mru.order)
+                self.applyFullSnapshot(fresh, anchorPid: targetPid)
+            }
+        } else {
+            // No cache yet — must do an immediate AX scan to populate rows.
+            let mruOrder = mru.order
+            DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                let fresh = AppCatalog.snapshot(orderedBy: mruOrder)
+                DispatchQueue.main.async {
+                    self?.applyFullSnapshot(fresh, anchorPid: targetPid)
+                }
             }
         }
     }
@@ -399,12 +416,14 @@ final class SwitcherController: SwitcherViewDelegate {
             if rows.indices.contains(index) {
                 let row = rows[index]
                 NSLog("[BetterCmdTab] commit visible: row=\(row.appName)[\(row.pid)] title=\(row.windowTitle)")
+                mru.bump(row.pid)
                 pendingActivation = { Activator.activate(row) }
             }
         case .primed:
             if primedApps.indices.contains(primedIndex) {
                 let app = primedApps[primedIndex]
                 NSLog("[BetterCmdTab] commit primed: app=\(app.localizedName ?? "?")[\(app.processIdentifier)] idx=\(primedIndex)")
+                mru.bump(app.processIdentifier)
                 pendingActivation = { Activator.activateApp(app) }
             }
         case .idle:
@@ -412,6 +431,7 @@ final class SwitcherController: SwitcherViewDelegate {
         }
 
         phase = .idle
+        cache.setPanelVisible(false)
         panel.dismiss()
         primedApps = []
         rows = []
@@ -426,6 +446,7 @@ final class SwitcherController: SwitcherViewDelegate {
         revealTimer?.invalidate()
         revealTimer = nil
         phase = .idle
+        cache.setPanelVisible(false)
         panel.dismiss()
         primedApps = []
         rows = []
@@ -440,6 +461,33 @@ final class SwitcherController: SwitcherViewDelegate {
         action(rows[index])
         let snapshot = rowFingerprint(rows)
         scheduleRefresh(previous: snapshot, retriesLeft: 6)
+    }
+
+    private func performCloseAction() {
+        guard phase == .visible, rows.indices.contains(index) else { return }
+        let row = rows[index]
+
+        if row.isFullscreen {
+            Activator.closeWindow(row)
+            cancel()
+            return
+        }
+
+        Activator.closeWindow(row)
+
+        rows.remove(at: index)
+        if rows.isEmpty {
+            cancel()
+            return
+        }
+        labels = RowLabels.labels(for: rows)
+        index = min(index, rows.count - 1)
+        applyPrefixReorder()
+
+        let snapshot = rowFingerprint(rows)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            self?.refreshRows(previous: snapshot, retriesLeft: 8)
+        }
     }
 
     private struct RowFingerprint: Equatable {
@@ -501,27 +549,39 @@ final class SwitcherController: SwitcherViewDelegate {
             return
         }
 
-        let selectedKey = rows.indices.contains(index) ? (rows[index].pid, rows[index].windowTitle, rows[index].window != nil) : nil
+        let n = rows.count
+        let selectedKey: (pid_t, String, Bool)? = rows.indices.contains(index)
+            ? (rows[index].pid, rows[index].windowTitle, rows[index].window != nil)
+            : nil
 
-        var matchingRows: [SwitcherRow] = []
-        var matchingLabels: [String] = []
-        var otherRows: [SwitcherRow] = []
-        var otherLabels: [String] = []
-        for i in 0..<rows.count {
+        // Single pass: collect match indices, then non-match indices. One array.
+        var orderIdx: [Int] = []
+        orderIdx.reserveCapacity(n)
+        var matchCount = 0
+        for i in 0..<n {
             if labels[i].hasPrefix(prefix) {
-                matchingRows.append(rows[i])
-                matchingLabels.append(labels[i])
-            } else {
-                otherRows.append(rows[i])
-                otherLabels.append(labels[i])
+                orderIdx.append(i)
+                matchCount += 1
             }
         }
-        rows = matchingRows + otherRows
-        labels = matchingLabels + otherLabels
+        for i in 0..<n where !labels[i].hasPrefix(prefix) {
+            orderIdx.append(i)
+        }
+
+        var newRows: [SwitcherRow] = []
+        newRows.reserveCapacity(n)
+        var newLabels: [String] = []
+        newLabels.reserveCapacity(n)
+        for i in orderIdx {
+            newRows.append(rows[i])
+            newLabels.append(labels[i])
+        }
+        rows = newRows
+        labels = newLabels
 
         if let key = selectedKey, let restored = rows.firstIndex(where: { $0.pid == key.0 && $0.windowTitle == key.1 && ($0.window != nil) == key.2 }) {
             index = restored
-        } else if !matchingRows.isEmpty {
+        } else if matchCount > 0 {
             index = 0
         } else {
             index = min(index, rows.count - 1)

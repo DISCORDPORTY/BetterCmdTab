@@ -6,20 +6,17 @@ struct WindowInfo {
     let title: String
     let isMinimized: Bool
     let isFullscreen: Bool
-    let tabRef: AXUIElement?
 
     init(
         ref: AXUIElement,
         title: String,
         isMinimized: Bool,
-        isFullscreen: Bool = false,
-        tabRef: AXUIElement? = nil
+        isFullscreen: Bool = false
     ) {
         self.ref = ref
         self.title = title
         self.isMinimized = isMinimized
         self.isFullscreen = isFullscreen
-        self.tabRef = tabRef
     }
 }
 
@@ -30,14 +27,13 @@ private struct AXRef: Hashable {
 }
 
 enum WindowEnumerator {
-    /// Brute-force scan range. Long-lived apps (Finder, Mail) and apps that
-    /// allocate many AX elements may have window IDs in the hundreds. We run
-    /// synchronously per refresh, so cap to keep latency bounded.
     private static let bruteForceLimit: UInt64 = 256
+    private static let preFilterTimeout: Float = 0.025
+    private static let confirmedTimeout: Float = 0.2
 
     static func windows(forPid pid: pid_t, isRegularApp: Bool = true) -> [WindowInfo] {
         let axApp = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(axApp, 0.2)
+        AXUIElementSetMessagingTimeout(axApp, Self.confirmedTimeout)
 
         var elements: [AXUIElement] = []
         var seenByElement = Set<AXRef>()
@@ -71,7 +67,9 @@ enum WindowEnumerator {
             ]
             for axId: UInt64 in 0..<bruteForceLimit {
                 guard let e = PrivateAPI.axElement(pid: pid, axId: axId) else { continue }
-                AXUIElementSetMessagingTimeout(e, 0.05)
+                // Fast pre-filter: most axIds are non-window elements. Use tight
+                // timeout to skip them quickly. Bump it once role confirmed.
+                AXUIElementSetMessagingTimeout(e, Self.preFilterTimeout)
 
                 var elemPid: pid_t = 0
                 guard AXUIElementGetPid(e, &elemPid) == .success, elemPid == pid else { continue }
@@ -79,6 +77,8 @@ enum WindowEnumerator {
                 var roleValue: AnyObject?
                 AXUIElementCopyAttributeValue(e, kAXRoleAttribute as CFString, &roleValue)
                 guard (roleValue as? String) == (kAXWindowRole as String) else { continue }
+
+                AXUIElementSetMessagingTimeout(e, Self.confirmedTimeout)
 
                 var subroleValue: AnyObject?
                 AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleValue)
@@ -103,20 +103,31 @@ enum WindowEnumerator {
 
         var infos: [WindowInfo] = []
         infos.reserveCapacity(elements.count)
-        var seenTabs = Set<AXRef>()
 
         let acceptedSubroles: Set<String> = [
             kAXStandardWindowSubrole as String,
             kAXDialogSubrole as String,
         ]
+        // Native macOS tab merging (Safari/Finder/TextEdit) exposes each tab
+        // as a separate AXWindow. Siblings share the same kAXTabsAttribute
+        // tab-button list. Group windows by that signature and keep one.
+        var seenTabGroups: Set<[AXRef]> = []
         for window in elements {
+            AXUIElementSetMessagingTimeout(window, Self.confirmedTimeout)
             var subroleValue: AnyObject?
             AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue)
             let subrole = (subroleValue as? String) ?? ""
             // Reject popovers, status items, panels, floating UI etc — accept
             // only AXStandardWindow / AXDialog (real Dock-switchable windows).
-            // This is what blocks menu-bar utility "Untitled" ghost rows.
             guard acceptedSubroles.contains(subrole) else { continue }
+
+            var tabsValue: AnyObject?
+            AXUIElementCopyAttributeValue(window, kAXTabsAttribute as CFString, &tabsValue)
+            if let tabs = tabsValue as? [AXUIElement], tabs.count > 1 {
+                let key = tabs.map { AXRef(element: $0) }
+                if seenTabGroups.contains(key) { continue }
+                seenTabGroups.insert(key)
+            }
 
             var minimizedValue: AnyObject?
             AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue)
@@ -130,74 +141,14 @@ enum WindowEnumerator {
             AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
             let windowTitle = (titleValue as? String) ?? ""
 
-            var tabsValue: AnyObject?
-            AXUIElementCopyAttributeValue(window, kAXTabsAttribute as CFString, &tabsValue)
-            var tabs = (tabsValue as? [AXUIElement]) ?? []
-            if tabs.count <= 1 {
-                tabs = findTabRadioButtons(in: window)
-            }
-
-            if tabs.count > 1 {
-                let unseen = tabs.filter { !seenTabs.contains(AXRef(element: $0)) }
-                if unseen.isEmpty { continue }
-                for tab in unseen {
-                    seenTabs.insert(AXRef(element: tab))
-                    var tabTitleValue: AnyObject?
-                    AXUIElementCopyAttributeValue(tab, kAXTitleAttribute as CFString, &tabTitleValue)
-                    let tabTitle = (tabTitleValue as? String) ?? ""
-                    let resolvedTitle = tabTitle.isEmpty ? windowTitle : tabTitle
-                    infos.append(WindowInfo(
-                        ref: window,
-                        title: resolvedTitle,
-                        isMinimized: minimized,
-                        isFullscreen: fullscreen,
-                        tabRef: tab
-                    ))
-                }
-            } else {
-                infos.append(WindowInfo(
-                    ref: window,
-                    title: windowTitle,
-                    isMinimized: minimized,
-                    isFullscreen: fullscreen,
-                    tabRef: nil
-                ))
-            }
+            infos.append(WindowInfo(
+                ref: window,
+                title: windowTitle,
+                isMinimized: minimized,
+                isFullscreen: fullscreen
+            ))
         }
 
         return infos
-    }
-
-    private static func findTabRadioButtons(in window: AXUIElement) -> [AXUIElement] {
-        var childrenValue: AnyObject?
-        AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &childrenValue)
-        guard let children = childrenValue as? [AXUIElement] else { return [] }
-
-        for child in children {
-            var roleValue: AnyObject?
-            AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &roleValue)
-            guard (roleValue as? String) == (kAXTabGroupRole as String) else { continue }
-
-            var tabsValue: AnyObject?
-            AXUIElementCopyAttributeValue(child, kAXTabsAttribute as CFString, &tabsValue)
-            if let tabs = tabsValue as? [AXUIElement], tabs.count > 1 {
-                return tabs
-            }
-
-            var tabChildrenValue: AnyObject?
-            AXUIElementCopyAttributeValue(child, kAXChildrenAttribute as CFString, &tabChildrenValue)
-            guard let tabChildren = tabChildrenValue as? [AXUIElement] else { return [] }
-
-            var radios: [AXUIElement] = []
-            for elem in tabChildren {
-                var rv: AnyObject?
-                AXUIElementCopyAttributeValue(elem, kAXRoleAttribute as CFString, &rv)
-                if (rv as? String) == "AXRadioButton" {
-                    radios.append(elem)
-                }
-            }
-            return radios
-        }
-        return []
     }
 }

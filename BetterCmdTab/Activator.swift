@@ -50,9 +50,14 @@ enum Activator {
             AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         }
 
-        if let tabRef = row.tabRef {
-            focusTab(tabRef)
-        }
+        // Non-AppKit windowing (Ghostty/Alacritty/Wezterm and similar
+        // GPU-rendered apps) won't receive keyboard focus from
+        // NSRunningApplication.activate() alone — they listen for AX main/
+        // focused attribute changes. Set both before raise so the app's own
+        // focus dispatch fires when activation lands.
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         // Cross-Space raise: kAXRaiseAction + NSRunningApplication.activate()
         // cannot move the user to a fullscreen Space that hosts only the target
@@ -62,6 +67,18 @@ enum Activator {
             PrivateAPI.raiseWindow(pid: row.pid, wid: wid)
         }
         bringToFront(app)
+
+        // After the app process is frontmost, re-assert focus on the target
+        // window. Some apps reset focused window during activation handshake;
+        // a second focused/main write inside the app's run loop pins it.
+        let pid = row.pid
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            let axApp = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(axApp, 0.1)
+            AXUIElementSetAttributeValue(axApp, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
     }
 
     private static func bringToFront(_ app: NSRunningApplication) {
@@ -104,104 +121,59 @@ enum Activator {
 
     static func closeWindow(_ row: SwitcherRow) {
         let window = row.window
-        let tabRef = row.tabRef
         let pid = row.pid
+        let isFullscreen = row.isFullscreen
 
         DispatchQueue.global(qos: .userInitiated).async {
-            if let tabRef {
-                focusTab(tabRef)
-                waitForTabSelected(tabRef, timeout: 0.3)
-                if let shortcut = closeTabShortcut(pid: pid) {
-                    postKeyShortcut(pid: pid, keyCode: 13, axModifiers: shortcut)
-                    return
-                }
-            }
             guard let window else { return }
+
+            if isFullscreen {
+                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                let wid = PrivateAPI.cgWindowId(of: window)
+                if wid != 0 {
+                    PrivateAPI.raiseWindow(pid: pid, wid: wid)
+                }
+                Thread.sleep(forTimeInterval: 0.6)
+                postKeyShortcut(pid: pid, keyCode: 13, axModifiers: 0)
+                return
+            }
+
+            pressCloseButton(window: window, attempts: 3)
+        }
+    }
+
+    private static func pressCloseButton(window: AXUIElement, attempts: Int) {
+        for i in 0..<attempts {
             var buttonValue: AnyObject?
-            AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &buttonValue)
-            guard CFGetTypeID(buttonValue as CFTypeRef) == AXUIElementGetTypeID() else { return }
-            let button = buttonValue as! AXUIElement
-            AXUIElementPerformAction(button, kAXPressAction as CFString)
+            let err = AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &buttonValue)
+            if err == .success, CFGetTypeID(buttonValue as CFTypeRef) == AXUIElementGetTypeID() {
+                let button = buttonValue as! AXUIElement
+                AXUIElementPerformAction(button, kAXPressAction as CFString)
+                return
+            }
+            if i < attempts - 1 {
+                Thread.sleep(forTimeInterval: 0.15)
+            }
         }
     }
 
     static func minimizeWindow(_ row: SwitcherRow) {
         guard let window = row.window else { return }
-        let tabRef = row.tabRef
+        let wasMinimized = row.isMinimized
+        let app = row.app
         DispatchQueue.global(qos: .userInitiated).async {
-            if let tabRef {
-                focusTab(tabRef)
-                waitForTabSelected(tabRef, timeout: 0.25)
+            if wasMinimized {
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                DispatchQueue.main.async {
+                    if #available(macOS 14.0, *) {
+                        _ = app.activate(from: NSRunningApplication.current, options: [])
+                    } else {
+                        app.activate(options: [.activateIgnoringOtherApps])
+                    }
+                }
+                return
             }
             AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
-        }
-    }
-
-    private static func focusTab(_ tabRef: AXUIElement) {
-        AXUIElementSetAttributeValue(tabRef, kAXValueAttribute as CFString, kCFBooleanTrue)
-        AXUIElementPerformAction(tabRef, kAXPressAction as CFString)
-    }
-
-    private static let tabTitleTokens: [String] = ["tab", "karta", "kart", "onglet", "reiter", "scheda", "pestaña", "pestana", "вкладк"]
-    private static let windowTitleTokens: [String] = ["window", "okno", "fenster", "fenêtre", "fenetre", "finestra", "ventana", "окно"]
-
-    private static func closeTabShortcut(pid: pid_t) -> Int? {
-        let axApp = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(axApp, 0.3)
-        var menuBarValue: AnyObject?
-        AXUIElementCopyAttributeValue(axApp, kAXMenuBarAttribute as CFString, &menuBarValue)
-        guard CFGetTypeID(menuBarValue as CFTypeRef) == AXUIElementGetTypeID() else { return nil }
-        let menuBar = menuBarValue as! AXUIElement
-
-        var candidates: [(title: String, mods: Int)] = []
-        collectMenuItems(in: menuBar, cmdChar: "w", into: &candidates, depth: 0)
-        if candidates.isEmpty { return nil }
-
-        if let tabItem = candidates.first(where: { c in
-            let t = c.title.lowercased()
-            return tabTitleTokens.contains(where: { t.contains($0) })
-        }) {
-            return tabItem.mods
-        }
-        if let nonWindow = candidates.first(where: { c in
-            let t = c.title.lowercased()
-            return !windowTitleTokens.contains(where: { t.contains($0) })
-        }) {
-            return nonWindow.mods
-        }
-        if let plain = candidates.first(where: { $0.mods == 0 }) {
-            return plain.mods
-        }
-        return candidates[0].mods
-    }
-
-    private static func collectMenuItems(in element: AXUIElement, cmdChar: String, into out: inout [(title: String, mods: Int)], depth: Int) {
-        if depth > 6 { return }
-
-        var roleValue: AnyObject?
-        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue)
-        let role = (roleValue as? String) ?? ""
-
-        if role == kAXMenuItemRole {
-            var charValue: AnyObject?
-            AXUIElementCopyAttributeValue(element, kAXMenuItemCmdCharAttribute as CFString, &charValue)
-            var modsValue: AnyObject?
-            AXUIElementCopyAttributeValue(element, kAXMenuItemCmdModifiersAttribute as CFString, &modsValue)
-            if let c = charValue as? String,
-               c.lowercased() == cmdChar.lowercased(),
-               let m = (modsValue as? NSNumber)?.intValue {
-                var titleValue: AnyObject?
-                AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &titleValue)
-                let title = (titleValue as? String) ?? ""
-                out.append((title, m))
-            }
-        }
-
-        var childrenValue: AnyObject?
-        AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue)
-        guard let children = childrenValue as? [AXUIElement] else { return }
-        for child in children {
-            collectMenuItems(in: child, cmdChar: cmdChar, into: &out, depth: depth + 1)
         }
     }
 
@@ -222,19 +194,17 @@ enum Activator {
         up.postToPid(pid)
     }
 
-    private static func waitForTabSelected(_ tabRef: AXUIElement, timeout: TimeInterval) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            var v: AnyObject?
-            AXUIElementCopyAttributeValue(tabRef, kAXValueAttribute as CFString, &v)
-            if let b = v as? Bool, b { return }
-            if let n = v as? NSNumber, n.boolValue { return }
-            Thread.sleep(forTimeInterval: 0.01)
-        }
-    }
-
     static func hideApp(_ row: SwitcherRow) {
-        row.app.hide()
+        if row.app.isHidden {
+            row.app.unhide()
+            if #available(macOS 14.0, *) {
+                _ = row.app.activate(from: NSRunningApplication.current, options: [])
+            } else {
+                row.app.activate(options: [.activateIgnoringOtherApps])
+            }
+        } else {
+            row.app.hide()
+        }
     }
 
     static func quitApp(_ row: SwitcherRow) {

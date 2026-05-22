@@ -19,7 +19,6 @@ final class SwitcherPanel: NSPanel {
         hidesOnDeactivate = false
         titleVisibility = .hidden
         animationBehavior = .none
-        appearance = NSAppearance(named: .vibrantDark)
         collectionBehavior = [
             .canJoinAllSpaces,
             .stationary,

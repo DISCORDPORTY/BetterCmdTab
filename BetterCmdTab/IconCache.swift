@@ -1,20 +1,47 @@
 import AppKit
 
 enum IconCache {
+    private static let capacity = 64
     private static var cache: [pid_t: NSImage] = [:]
+    private static var order: [pid_t] = []
 
     static func icon(for row: SwitcherRow) -> NSImage? {
-        if let cached = cache[row.pid] { return cached }
+        let pid = row.pid
+        if let cached = cache[pid] {
+            touch(pid)
+            return cached
+        }
         guard let image = row.app.icon else { return nil }
-        cache[row.pid] = image
+        cache[pid] = image
+        order.append(pid)
+        evictIfNeeded()
         return image
     }
 
     static func evict(_ pid: pid_t) {
-        cache.removeValue(forKey: pid)
+        if cache.removeValue(forKey: pid) != nil {
+            if let idx = order.firstIndex(of: pid) {
+                order.remove(at: idx)
+            }
+        }
     }
 
     static func clear() {
         cache.removeAll()
+        order.removeAll()
+    }
+
+    private static func touch(_ pid: pid_t) {
+        if let idx = order.firstIndex(of: pid) {
+            order.remove(at: idx)
+            order.append(pid)
+        }
+    }
+
+    private static func evictIfNeeded() {
+        while order.count > capacity {
+            let victim = order.removeFirst()
+            cache.removeValue(forKey: victim)
+        }
     }
 }

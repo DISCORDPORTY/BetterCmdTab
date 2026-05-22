@@ -88,8 +88,7 @@ enum AppCatalog {
                         window: win.ref,
                         windowTitle: win.title,
                         isMinimized: win.isMinimized,
-                        isFullscreen: win.isFullscreen,
-                        tabRef: win.tabRef
+                        isFullscreen: win.isFullscreen
                     ))
                 }
             }
