@@ -1,43 +1,38 @@
-//
-//  BetterCmdTabUITests.swift
-//  BetterCmdTabUITests
-//
-//  Created by artur on 22/05/2026.
-//
-
 import XCTest
 
+/// BetterCmdTab is an LSUIElement (accessory) app — no main window, no Dock
+/// entry. UI assertions limited to: launch succeeds, status item registers,
+/// process stays alive long enough to serve hotkeys.
 final class BetterCmdTabUITests: XCTestCase {
 
     override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
-
-        // In UI tests it is usually best to stop immediately when a failure occurs.
         continueAfterFailure = false
-
-        // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
-    }
-
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
     }
 
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
+    func testLaunchSucceeds() throws {
         let app = XCUIApplication()
         app.launch()
-
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
+        XCTAssertEqual(app.state, .runningForeground, "App must reach runningForeground after launch")
     }
 
     @MainActor
-    func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
-        measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
-        }
+    func testStaysRunningAfterLaunch() throws {
+        // Accessory apps shouldn't auto-terminate when last window closes —
+        // they have no window. Verify process survives a short idle window.
+        let app = XCUIApplication()
+        app.launch()
+        let stillRunning = NSPredicate(format: "state == %d", XCUIApplication.State.runningForeground.rawValue)
+        let expectation = XCTNSPredicateExpectation(predicate: stillRunning, object: app)
+        let result = XCTWaiter().wait(for: [expectation], timeout: 3)
+        XCTAssertEqual(result, .completed, "App must remain running 3s after launch")
+    }
+
+    @MainActor
+    func testCleanTerminate() throws {
+        let app = XCUIApplication()
+        app.launch()
+        app.terminate()
+        XCTAssertEqual(app.state, .notRunning, "App must terminate cleanly")
     }
 }

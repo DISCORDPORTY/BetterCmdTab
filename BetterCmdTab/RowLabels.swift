@@ -3,7 +3,16 @@ import Foundation
 enum RowLabels {
     static let reserved: Set<Character> = ["w", "m", "h", "q"]
 
+    struct Input {
+        let appName: String
+        let windowTitle: String
+    }
+
     static func labels(for rows: [SwitcherRow]) -> [String] {
+        labels(forInputs: rows.map { Input(appName: $0.appName, windowTitle: $0.windowTitle) })
+    }
+
+    static func labels(forInputs rows: [Input]) -> [String] {
         var labels = [String](repeating: "", count: rows.count)
         guard !rows.isEmpty else { return labels }
 
@@ -39,7 +48,7 @@ enum RowLabels {
         return nil
     }
 
-    private static func secondaryLetter(_ row: SwitcherRow, skipping first: Character) -> Character? {
+    private static func secondaryLetter(_ row: Input, skipping first: Character) -> Character? {
         if !row.windowTitle.isEmpty {
             let folded = row.windowTitle.folding(options: .diacriticInsensitive, locale: nil).lowercased()
             for c in folded {
