@@ -71,6 +71,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         checkUpdatesItem.target = self
         menu.addItem(checkUpdatesItem)
 
+        let settingsItem = NSMenuItem(
+            title: "Settings…",
+            action: #selector(openSettings),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "Quit BetterCmdTab", action: #selector(quit), keyEquivalent: "q")
@@ -107,6 +115,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 break
             }
         }
+    }
+
+    @objc private func openSettings() {
+        SettingsWindowPresenter.shared.show()
     }
 
     @objc private func quit() {

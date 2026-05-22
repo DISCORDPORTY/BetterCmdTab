@@ -102,15 +102,16 @@ struct UpdateWindowView: View {
                 .foregroundStyle(.secondary)
 
             ScrollView {
-                if let notes, !notes.isEmpty {
-                    Text(attributed(notes))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Text("No release notes provided.")
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                Group {
+                    if let notes, !notes.isEmpty {
+                        MarkdownView(source: notes)
+                    } else {
+                        Text("No release notes provided.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
+                .padding(12)
             }
             .background(Color(nsColor: .textBackgroundColor).opacity(0.4),
                         in: RoundedRectangle(cornerRadius: 8))
@@ -119,15 +120,6 @@ struct UpdateWindowView: View {
                     .strokeBorder(Color.secondary.opacity(0.2))
             )
         }
-    }
-
-    private func attributed(_ source: String) -> AttributedString {
-        if let parsed = try? AttributedString(markdown: source, options: .init(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )) {
-            return parsed
-        }
-        return AttributedString(source)
     }
 
     private func progressPane(progress: Double, title: String) -> some View {
