@@ -78,7 +78,7 @@ struct SwitcherMetrics: Equatable {
         case .list:
             outerPadding = round(baseOuterPadding * scale)
             cornerRadius = round(baseCornerRadius * scale)
-        case .iconDock:
+        case .gridView:
             outerPadding = round(baseTileOuterPadding * scale)
             cornerRadius = round(baseTileCornerRadius * scale)
         }

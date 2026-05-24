@@ -217,7 +217,7 @@ final class SwitcherView: NSView {
         switch metrics.layoutMode {
         case .list:
             return SwitcherItemView(frame: .zero)
-        case .iconDock:
+        case .gridView:
             return SwitcherIconItemView(frame: .zero)
         }
     }
@@ -283,7 +283,7 @@ final class SwitcherView: NSView {
         switch metrics.layoutMode {
         case .list:
             layout = computeListLayout()
-        case .iconDock:
+        case .gridView:
             layout = computeIconDockLayout()
         }
         cachedLayout = layout

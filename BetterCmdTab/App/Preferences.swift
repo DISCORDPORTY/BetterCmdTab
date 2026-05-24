@@ -3,12 +3,12 @@ import Combine
 
 enum SwitcherLayoutMode: String, CaseIterable {
     case list
-    case iconDock
+    case gridView = "iconDock"
 
     var displayName: String {
         switch self {
         case .list: return "List"
-        case .iconDock: return "Icon Dock"
+        case .gridView: return "Grid View"
         }
     }
 }
@@ -30,6 +30,6 @@ final class Preferences: ObservableObject {
 
     private init() {
         let raw = UserDefaults.standard.string(forKey: Keys.switcherLayoutMode)
-        self.switcherLayoutMode = raw.flatMap(SwitcherLayoutMode.init(rawValue:)) ?? .list
+        self.switcherLayoutMode = raw.flatMap(SwitcherLayoutMode.init(rawValue:)) ?? .gridView
     }
 }

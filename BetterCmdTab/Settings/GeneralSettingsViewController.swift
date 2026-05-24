@@ -5,12 +5,15 @@ import Combine
 final class GeneralSettingsViewController: NSViewController {
 
     private let launchSwitch = NSSwitch()
-    private let accessibilityRow = SettingsRowView(title: "Accessibility access")
+    private let accessibilityRow = SettingsRowView(
+        title: "Accessibility access",
+        description: "Required to intercept Cmd+Tab and read information about your open windows."
+    )
     private let permissionIcon = NSImageView()
     private let permissionButton = NSButton(title: "", target: nil, action: nil)
 
     private let betaSwitch = NSSwitch()
-    private let layoutModePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var layoutRadioGroup: SettingsRadioGroupView!
 
     private var cancellables = Set<AnyCancellable>()
     private var axTimer: Timer?
@@ -20,6 +23,7 @@ final class GeneralSettingsViewController: NSViewController {
         let behavior = SettingsSectionView(header: "Behavior")
         let launchRow = SettingsRowView(
             title: "Launch at login",
+            description: "Open BetterCmdTab automatically when you sign in to your Mac.",
             accessory: launchSwitch
         )
         launchSwitch.controlSize = .small
@@ -29,22 +33,32 @@ final class GeneralSettingsViewController: NSViewController {
 
         // Appearance section
         let appearance = SettingsSectionView(header: "Appearance")
-        layoutModePopUp.controlSize = .small
-        layoutModePopUp.bezelStyle = .rounded
-        layoutModePopUp.target = self
-        layoutModePopUp.action = #selector(changeLayoutMode(_:))
-        layoutModePopUp.removeAllItems()
-        for mode in SwitcherLayoutMode.allCases {
-            layoutModePopUp.addItem(withTitle: mode.displayName)
-            if let item = layoutModePopUp.lastItem {
-                item.representedObject = mode.rawValue
-            }
-        }
-        let layoutRow = SettingsRowView(
-            title: "Switcher layout",
-            accessory: layoutModePopUp
+        let options: [SettingsRadioGroupView.Option] = [
+            .init(
+                identifier: SwitcherLayoutMode.gridView.rawValue,
+                title: SwitcherLayoutMode.gridView.displayName,
+                subtitle: "Compact grid of large app icons, similar to the macOS Dock."
+            ),
+            .init(
+                identifier: SwitcherLayoutMode.list.rawValue,
+                title: SwitcherLayoutMode.list.displayName,
+                subtitle: "Vertical list pairing each icon with its full application name."
+            ),
+        ]
+        layoutRadioGroup = SettingsRadioGroupView(
+            options: options,
+            selected: Preferences.shared.switcherLayoutMode.rawValue
         )
-        appearance.addContent(layoutRow)
+        layoutRadioGroup.onSelectionChange = { identifier in
+            guard let mode = SwitcherLayoutMode(rawValue: identifier) else { return }
+            Preferences.shared.switcherLayoutMode = mode
+        }
+        let layoutBlock = SettingsLabeledBlockView(
+            title: "Switcher Layout",
+            description: "How application icons are arranged when you hold Cmd+Tab.",
+            content: layoutRadioGroup
+        )
+        appearance.addContent(layoutBlock)
 
         // Permissions section
         let permissions = SettingsSectionView(header: "Permissions")
@@ -76,6 +90,7 @@ final class GeneralSettingsViewController: NSViewController {
         let updates = SettingsSectionView(header: "Update Channel")
         let betaRow = SettingsRowView(
             title: "Include beta releases",
+            description: "Receive pre-release versions as soon as they're available. Beta builds may be unstable.",
             accessory: betaSwitch
         )
         betaSwitch.controlSize = .small
@@ -139,21 +154,9 @@ final class GeneralSettingsViewController: NSViewController {
         GitHubUpdater.shared.includePreReleases = (sender.state == .on)
     }
 
-    @objc private func changeLayoutMode(_ sender: NSPopUpButton) {
-        guard
-            let raw = sender.selectedItem?.representedObject as? String,
-            let mode = SwitcherLayoutMode(rawValue: raw)
-        else { return }
-        Preferences.shared.switcherLayoutMode = mode
-    }
-
     private func applyLayoutMode(_ mode: SwitcherLayoutMode) {
-        let targetIndex = layoutModePopUp.itemArray.firstIndex { item in
-            (item.representedObject as? String) == mode.rawValue
-        } ?? 0
-        if layoutModePopUp.indexOfSelectedItem != targetIndex {
-            layoutModePopUp.selectItem(at: targetIndex)
-        }
+        guard layoutRadioGroup.selectedIdentifier != mode.rawValue else { return }
+        layoutRadioGroup.select(identifier: mode.rawValue, notify: false)
     }
 
     @objc private func openSystemSettings() {

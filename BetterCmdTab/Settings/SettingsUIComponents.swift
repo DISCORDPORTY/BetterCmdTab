@@ -345,6 +345,179 @@ final class SettingsRowView: NSView {
     }
 }
 
+// MARK: - Radio group with title + subtitle per option
+
+/// Vertical group of radio buttons where each option carries an optional
+/// secondary explanation under the title. Used in Settings to give choices
+/// (e.g. switcher layout) more context than a bare popup.
+@MainActor
+final class SettingsRadioGroupView: NSView {
+
+    struct Option {
+        let identifier: String
+        let title: String
+        let subtitle: String?
+
+        init(identifier: String, title: String, subtitle: String? = nil) {
+            self.identifier = identifier
+            self.title = title
+            self.subtitle = subtitle
+        }
+    }
+
+    var onSelectionChange: ((String) -> Void)?
+
+    private let stack: NSStackView = {
+        let s = NSStackView()
+        s.orientation = .vertical
+        s.alignment = .leading
+        s.spacing = 10
+        s.translatesAutoresizingMaskIntoConstraints = false
+        return s
+    }()
+
+    private var buttonsByIdentifier: [String: NSButton] = [:]
+
+    init(options: [Option], selected: String? = nil) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        for option in options {
+            let row = makeOptionRow(option)
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+
+        if let selected {
+            select(identifier: selected, notify: false)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    func select(identifier: String, notify: Bool = false) {
+        for (id, button) in buttonsByIdentifier {
+            button.state = (id == identifier) ? .on : .off
+        }
+        if notify { onSelectionChange?(identifier) }
+    }
+
+    var selectedIdentifier: String? {
+        buttonsByIdentifier.first(where: { $0.value.state == .on })?.key
+    }
+
+    private func makeOptionRow(_ option: Option) -> NSView {
+        let button = NSButton(radioButtonWithTitle: option.title, target: self, action: #selector(radioChanged(_:)))
+        button.font = .systemFont(ofSize: 13)
+        button.identifier = NSUserInterfaceItemIdentifier(option.identifier)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        buttonsByIdentifier[option.identifier] = button
+
+        let normalizedSubtitle = option.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasSubtitle = !(normalizedSubtitle?.isEmpty ?? true)
+
+        let container = FlippedView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(button)
+
+        var constraints: [NSLayoutConstraint] = [
+            button.topAnchor.constraint(equalTo: container.topAnchor),
+            button.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            button.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+        ]
+
+        if hasSubtitle {
+            let subtitle = NSTextField(wrappingLabelWithString: normalizedSubtitle ?? "")
+            subtitle.font = .systemFont(ofSize: 11)
+            subtitle.textColor = .secondaryLabelColor
+            subtitle.maximumNumberOfLines = 0
+            subtitle.translatesAutoresizingMaskIntoConstraints = false
+            subtitle.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            container.addSubview(subtitle)
+
+            constraints.append(contentsOf: [
+                subtitle.topAnchor.constraint(equalTo: button.bottomAnchor, constant: 2),
+                subtitle.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 19),
+                subtitle.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                subtitle.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            ])
+        } else {
+            constraints.append(button.bottomAnchor.constraint(equalTo: container.bottomAnchor))
+        }
+
+        NSLayoutConstraint.activate(constraints)
+        return container
+    }
+
+    @objc private func radioChanged(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        select(identifier: id, notify: true)
+    }
+}
+
+// MARK: - Labeled block (inline title + description above arbitrary content)
+
+/// A block inside a settings card that puts a small inline title and an
+/// optional description above a content view (e.g. a radio group). Useful
+/// when a single setting needs more explanation than a row subtitle can fit.
+@MainActor
+final class SettingsLabeledBlockView: NSView {
+
+    init(title: String, description: String?, content: NSView) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        setupViews(title: title, description: description, content: content)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    private func setupViews(title: String, description: String?, content: NSView) {
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        titleLabel.textColor = .labelColor
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(titleLabel)
+
+        if let description, !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let descLabel = NSTextField(wrappingLabelWithString: description)
+            descLabel.font = .systemFont(ofSize: 11)
+            descLabel.textColor = .secondaryLabelColor
+            descLabel.maximumNumberOfLines = 0
+            descLabel.translatesAutoresizingMaskIntoConstraints = false
+            descLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            stack.addArrangedSubview(descLabel)
+            descLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+
+        content.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(content)
+        stack.setCustomSpacing(12, after: stack.arrangedSubviews[stack.arrangedSubviews.count - 2])
+        content.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+}
+
 // MARK: - Scrolling tab layout helper
 
 enum SettingsLayout {
