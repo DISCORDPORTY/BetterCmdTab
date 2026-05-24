@@ -46,11 +46,9 @@ enum WindowEnumerator {
         guard let cfArray = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else {
             return [:]
         }
-        let selfPid = getpid()
         var result: [pid_t: Set<CGWindowID>] = [:]
         for entry in cfArray {
-            guard let ownerPID = entry[kCGWindowOwnerPID as String] as? pid_t,
-                  ownerPID != selfPid else { continue }
+            guard let ownerPID = entry[kCGWindowOwnerPID as String] as? pid_t else { continue }
             let layer = (entry[kCGWindowLayer as String] as? Int) ?? 0
             if layer != 0 { continue }
             let alpha = (entry[kCGWindowAlpha as String] as? Double) ?? 1.0

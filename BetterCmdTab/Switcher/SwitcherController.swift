@@ -473,7 +473,7 @@ final class SwitcherController: SwitcherViewDelegate {
     private func performOnVisibleTarget(_ action: (SwitcherRow) -> Void) {
         guard phase == .visible, rows.indices.contains(index) else { return }
         action(rows[index])
-        scheduleVisibleRefresh()
+        scheduleVisibleRefresh(after: 0.25)
     }
 
     private func performCloseAction() {
@@ -497,27 +497,37 @@ final class SwitcherController: SwitcherViewDelegate {
         index = min(index, rows.count - 1)
         applyPrefixReorder()
 
-        scheduleVisibleRefresh()
+        scheduleVisibleRefresh(after: 0.25)
     }
 
-    /// AXObserver-driven refresh of visible rows. Replaces the prior 8×96ms
-    /// busy-poll: the AX target (close button / minimize / hide) triggers an
-    /// AX notification → cache.bumpApp → next scheduleFullRefresh completion
-    /// re-applies fresh rows once. Generation token prevents stale apply if
-    /// the panel was dismissed in the meantime.
-    private func scheduleVisibleRefresh() {
+    /// Refresh visible rows from the AX cache after a window action. The
+    /// `delay` parameter is critical: actions like close / minimize / hide
+    /// dispatch async AX requests that take ~100–200ms to propagate. Without
+    /// the delay the snapshot fires before the target app updates and reports
+    /// the still-present window, re-adding the row that was just locally
+    /// removed. Generation token prevents stale apply if the panel was
+    /// dismissed in the meantime.
+    private func scheduleVisibleRefresh(after delay: TimeInterval = 0) {
         let gen = revealGeneration
-        cache.scheduleFullRefresh { [weak self] in
+        let apply = { [weak self] in
             guard let self, gen == self.revealGeneration, self.phase == .visible else { return }
-            let fresh = self.cache.rows(orderedBy: self.mru.order)
-            if fresh.isEmpty {
-                self.cancel()
-                return
+            self.cache.scheduleFullRefresh { [weak self] in
+                guard let self, gen == self.revealGeneration, self.phase == .visible else { return }
+                let fresh = self.cache.rows(orderedBy: self.mru.order)
+                if fresh.isEmpty {
+                    self.cancel()
+                    return
+                }
+                self.rows = fresh
+                self.labels = RowLabels.labels(for: fresh)
+                self.index = min(self.index, fresh.count - 1)
+                self.applyPrefixReorder()
             }
-            self.rows = fresh
-            self.labels = RowLabels.labels(for: fresh)
-            self.index = min(self.index, fresh.count - 1)
-            self.applyPrefixReorder()
+        }
+        if delay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: apply)
+        } else {
+            apply()
         }
     }
 

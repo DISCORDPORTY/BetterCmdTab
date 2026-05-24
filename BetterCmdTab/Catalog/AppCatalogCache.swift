@@ -123,7 +123,7 @@ final class AppCatalogCache {
         }
     }
 
-    private static func computeEntries() -> [pid_t: AppCacheEntry] {
+    nonisolated private static func computeEntries() -> [pid_t: AppCacheEntry] {
         let selfPid = getpid()
         let candidates = NSWorkspace.shared.runningApplications.filter { app in
             guard app.processIdentifier != selfPid else { return false }
@@ -136,10 +136,11 @@ final class AppCatalogCache {
 
         var windowsBuffer: [[WindowInfo]] = Array(repeating: [], count: count)
         windowsBuffer.withUnsafeMutableBufferPointer { buffer in
+            nonisolated(unsafe) let bufferRef = buffer
             DispatchQueue.concurrentPerform(iterations: count) { i in
                 let app = candidates[i]
                 let pid = app.processIdentifier
-                buffer[i] = WindowEnumerator.windows(
+                bufferRef[i] = WindowEnumerator.windows(
                     forPid: pid,
                     isRegularApp: app.activationPolicy == .regular,
                     expectedCGWindowIDs: cgMap[pid] ?? []
@@ -205,10 +206,8 @@ final class AppCatalogCache {
     /// no timeout API and can stall ~50–100ms when the target app is slow —
     /// batching all apps inline blocked startup by 10+ seconds.
     private func installAXObserversForAllApps() {
-        let selfPid = getpid()
         let pids = NSWorkspace.shared.runningApplications
             .map(\.processIdentifier)
-            .filter { $0 != selfPid }
         var iterator = pids.makeIterator()
         func step() {
             guard let pid = iterator.next() else { return }
@@ -219,7 +218,7 @@ final class AppCatalogCache {
     }
 
     private func installAXObserver(forPid pid: pid_t) {
-        guard pid != getpid(), axObservers[pid] == nil else { return }
+        guard axObservers[pid] == nil else { return }
         var observer: AXObserver?
         let cb: AXObserverCallback = { _, element, _, refcon in
             guard let refcon else { return }
@@ -258,7 +257,6 @@ final class AppCatalogCache {
     /// window creation collapse to a single bumpApp call within the next run
     /// loop tick.
     private func scheduleBumpApp(pid: pid_t) {
-        guard pid != getpid() else { return }
         let wasEmpty = pendingBumps.isEmpty
         pendingBumps.insert(pid)
         if wasEmpty {
@@ -272,7 +270,10 @@ final class AppCatalogCache {
     }
 
     func bumpApp(pid: pid_t) {
-        guard pid != getpid() else { return }
+        guard pid != getpid() else {
+            entries.removeValue(forKey: pid)
+            return
+        }
         guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == pid }) else {
             entries.removeValue(forKey: pid)
             return
