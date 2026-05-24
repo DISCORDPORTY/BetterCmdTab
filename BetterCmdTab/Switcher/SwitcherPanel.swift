@@ -1,8 +1,35 @@
 import AppKit
+import ObjectiveC
 
 @MainActor
 final class SwitcherPanel: NSPanel {
+    /// Replace the inherited `-[NSWindow appearsActive]` getter for
+    /// `SwitcherPanel` instances with a constant `true`. Dynamic NSColors used
+    /// by row views (`.labelColor`, `.controlAccentColor`,
+    /// `.tertiaryLabelColor`) resolve via the host window's `appearsActive`;
+    /// when the panel transiently resigns key — e.g. Cmd+Q on a row terminates
+    /// the frontmost app and the system briefly hands key to the next app
+    /// before our `didResignKey` observer reclaims it — those colors render
+    /// in their dimmed "inactive" form for one or more frames. Reclaiming key
+    /// can't fully hide that gap because AppKit's appearsActive flip happens
+    /// before our handler is even invoked. Overriding the getter at the ObjC
+    /// runtime level forces every consumer (NSColor resolution,
+    /// NSVisualEffectView/NSGlassEffectView, control drawing) to see the
+    /// panel as always-active while it's on screen. NSWindow.appearsActive
+    /// isn't `open` in Swift's overlay, so a Swift `override var` won't
+    /// compile — runtime method replacement is the only way to intercept it.
+    private static let installAppearsActiveOverride: Void = {
+        let cls: AnyClass = SwitcherPanel.self
+        let sel = NSSelectorFromString("appearsActive")
+        guard let original = class_getInstanceMethod(cls, sel),
+              let encoding = method_getTypeEncoding(original) else { return }
+        let block: @convention(block) (AnyObject) -> Bool = { _ in true }
+        let imp = imp_implementationWithBlock(block)
+        class_replaceMethod(cls, sel, imp, encoding)
+    }()
+
     init() {
+        _ = Self.installAppearsActiveOverride
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 200, height: 120),
             styleMask: .nonactivatingPanel,
@@ -31,6 +58,22 @@ final class SwitcherPanel: NSPanel {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    /// Swallow `resignKey` while the panel is on screen. The internal
+    /// `_isKey` flip has already happened by the time AppKit calls this — but
+    /// `super.resignKey()` is what posts `NSWindow.didResignKeyNotification`,
+    /// which NSGlassEffectView listens to in order to animate its
+    /// active→inactive transition. Suppressing the notification keeps the
+    /// glass backdrop from playing its dim-out animation on transient key
+    /// loss (e.g. Cmd+Q on a row terminating the frontmost app). The
+    /// `didResignKey` observer in SwitcherController still reclaims key on
+    /// the next runloop so internal NSWindow state self-heals.
+    override func resignKey() {
+        guard isVisible else {
+            super.resignKey()
+            return
+        }
+    }
 
     func present() {
         guard let content = contentView else { return }
