@@ -265,6 +265,12 @@ final class SwitcherController: SwitcherViewDelegate {
         switch phase {
         case .idle:
             mru.syncFrontmost()
+            // Kick a cache refresh now so the snapshot has the full
+            // ~revealDelay window to settle before reveal() reads it — keeps
+            // windows created without an AX windowCreated event (or whose
+            // bumpApp finished before AX registered them) from popping in
+            // mid-presentation.
+            cache.scheduleFullRefresh()
             let selfPid = getpid()
             guard let front = NSWorkspace.shared.frontmostApplication,
                   front.processIdentifier != selfPid else { return }
@@ -285,6 +291,10 @@ final class SwitcherController: SwitcherViewDelegate {
         switch phase {
         case .idle:
             mru.syncFrontmost()
+            // Pre-warm the catalog before the ~100ms primed delay elapses so
+            // reveal() reads an up-to-date cache instead of stale rows that
+            // then visibly re-populate after the panel appears.
+            cache.scheduleFullRefresh()
             primedApps = AppCatalog.fastAppList(orderedBy: mru.order)
             guard !primedApps.isEmpty else { return }
             if primedApps.count == 1 {

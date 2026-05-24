@@ -11,6 +11,16 @@ final class AppCatalogCache {
     private(set) var entries: [pid_t: AppCacheEntry] = [:]
     private var pendingRefresh = false
     private var pendingBumps: Set<pid_t> = []
+    /// Per-pid serialization for `bumpApp`. `snapshotQueue` is concurrent, so
+    /// two bumps for the same pid can race — and since later snapshots can
+    /// finish *before* earlier ones, the stale completion overwrites fresh
+    /// data and the cache gets stuck (e.g. burst of 10 window creates ends
+    /// with cache showing 5 because the slow first bump landed last). With
+    /// in-flight tracking only one bump per pid runs at a time; any extra
+    /// request collapses into a single "pending" slot that re-bumps once the
+    /// current one finishes, so we always converge on the latest state.
+    private var pidBumpInFlight: Set<pid_t> = []
+    private var pidBumpPending: Set<pid_t> = []
     private weak var mru: MRUTracker?
     private var observers: [NSObjectProtocol] = []
     private var axObservers: [pid_t: AXObserver] = [:]
@@ -298,6 +308,10 @@ final class AppCatalogCache {
             entries.removeValue(forKey: pid)
             return
         }
+        if pidBumpInFlight.contains(pid) {
+            pidBumpPending.insert(pid)
+            return
+        }
         guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == pid }) else {
             entries.removeValue(forKey: pid)
             return
@@ -308,6 +322,7 @@ final class AppCatalogCache {
             return
         }
         let isRegular = policy == .regular
+        pidBumpInFlight.insert(pid)
         snapshotQueue.async { [weak self] in
             let cgSnapshot = WindowEnumerator.snapshotCGWindowMap()
             let windows = WindowEnumerator.windows(
@@ -318,12 +333,19 @@ final class AppCatalogCache {
             )
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.pidBumpInFlight.remove(pid)
                 if policy == .regular {
                     self.entries[pid] = AppCacheEntry(app: app, windows: windows)
                 } else if policy == .accessory, !windows.isEmpty {
                     self.entries[pid] = AppCacheEntry(app: app, windows: windows)
                 } else {
                     self.entries.removeValue(forKey: pid)
+                }
+                // Re-bump if another request landed while we were in flight —
+                // captures any AX state change that happened between scan and
+                // completion (typical during rapid window creation bursts).
+                if self.pidBumpPending.remove(pid) != nil {
+                    self.bumpApp(pid: pid)
                 }
             }
         }
