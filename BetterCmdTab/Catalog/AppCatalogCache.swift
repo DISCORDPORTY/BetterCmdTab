@@ -112,6 +112,10 @@ final class AppCatalogCache {
     }
 
     private static func statusPriority(_ row: SwitcherRow) -> Int {
+        // Windowless regular apps (running but with no open windows) go after
+        // everything else — they're least immediately actionable. Placeholders
+        // keep priority 0 so they don't get demoted while the cache warms up.
+        if row.window == nil, !row.isPlaceholder { return 3 }
         if row.app.isHidden { return 2 }
         if row.isMinimized { return 1 }
         return 0

@@ -224,7 +224,7 @@ final class SwitcherIconItemView: NSView, SwitcherItemViewProtocol {
         ])
         if highlightLen > 0 {
             let range = NSRange(location: 0, length: highlightLen)
-            attr.addAttribute(.foregroundColor, value: NSColor(red: 1.0, green: 0.85, blue: 0.4, alpha: 1.0), range: range)
+            attr.addAttribute(.foregroundColor, value: NSColor.controlAccentColor, range: range)
         }
         letterLabel.attributedStringValue = attr
         letterLabel.sizeToFit()
@@ -232,13 +232,14 @@ final class SwitcherIconItemView: NSView, SwitcherItemViewProtocol {
     }
 
     private func centerLetterLabel() {
-        let badgeSize = letterBadge.bounds.width
-        guard badgeSize > 0 else { return }
+        let badgeW = letterBadge.bounds.width
+        let badgeH = letterBadge.bounds.height
+        guard badgeW > 0, badgeH > 0 else { return }
         let w = ceil(letterLabel.frame.width)
         let h = ceil(letterLabel.frame.height)
         letterLabel.frame = NSRect(
-            x: round((badgeSize - w) / 2),
-            y: round((badgeSize - h) / 2),
+            x: round((badgeW - w) / 2),
+            y: round((badgeH - h) / 2),
             width: w,
             height: h
         )
@@ -261,12 +262,19 @@ final class SwitcherIconItemView: NSView, SwitcherItemViewProtocol {
         )
         imageView.frame = iconRect
 
-        let badgeSize = m.tileLetterBadgeSize
+        // Capsule badge: height stays at tileLetterBadgeSize so single-letter
+        // hints keep the original circular look; width grows to fit longer
+        // labels (CBA, CBB, …) with side padding so the text never overflows
+        // its background. cornerRadius = height/2 makes both shapes pill out.
+        let badgeH = m.tileLetterBadgeSize
+        let labelW = ceil(letterLabel.frame.width)
+        let sidePadding = badgeH * 0.35
+        let badgeW = max(badgeH, labelW + sidePadding * 2)
         letterBadge.frame = NSRect(
             x: iconArea.minX + 2,
-            y: iconArea.maxY - badgeSize - 2,
-            width: badgeSize,
-            height: badgeSize
+            y: iconArea.maxY - badgeH - 2,
+            width: badgeW,
+            height: badgeH
         )
         centerLetterLabel()
 

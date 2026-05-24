@@ -108,6 +108,10 @@ enum AppCatalog {
     }
 
     private static func statusPriority(_ row: SwitcherRow) -> Int {
+        // Mirror AppCatalogCache.statusPriority so cold-path snapshots and
+        // cached snapshots agree on row ordering. Windowless regular apps go
+        // last; placeholders stay normal so they don't get demoted pre-warm.
+        if row.window == nil, !row.isPlaceholder { return 3 }
         if row.app.isHidden { return 2 }
         if row.isMinimized { return 1 }
         return 0

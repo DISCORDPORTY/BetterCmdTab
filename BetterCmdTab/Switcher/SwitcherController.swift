@@ -624,7 +624,25 @@ final class SwitcherController: SwitcherViewDelegate {
         recordClosedTombstone(for: row)
         Activator.closeWindow(row)
 
+        let closedApp = row.app
+        let closedPid = row.pid
         rows.remove(at: index)
+
+        // If this was the only window for a regular app, demote the app to a
+        // windowless row at the end of the list right now. Otherwise the app
+        // visibly vanishes for ~250ms (until the cache refresh + tombstone
+        // filter substitute one) — closing the window shouldn't make the app
+        // flicker out of the switcher.
+        if closedApp.activationPolicy == .regular,
+           !rows.contains(where: { $0.pid == closedPid }) {
+            rows.append(SwitcherRow(
+                app: closedApp,
+                window: nil,
+                windowTitle: "",
+                isMinimized: false
+            ))
+        }
+
         if rows.isEmpty {
             cancel()
             return
@@ -716,6 +734,16 @@ final class SwitcherController: SwitcherViewDelegate {
         var result: [SwitcherRow] = []
         result.reserveCapacity(snapshot.count)
         var matchedSigIndices = Set<Int>()
+        var keptPids = Set<pid_t>()
+        // Track each pid whose every row got tombstoned. If a regular app ends
+        // up fully hidden (close-last-window race: cache still lists the dying
+        // AX window because the destroy hasn't propagated), substitute a
+        // windowless row appended at the end — matches the windowless-apps-go-
+        // last sort order applied elsewhere and avoids the row jumping
+        // mid-list once the cache catches up. `discovery` keeps multiple
+        // substitutions in original snapshot order.
+        var firstHiddenByPid: [pid_t: (app: NSRunningApplication, discovery: Int)] = [:]
+        var discoveryCounter = 0
         for row in snapshot {
             let rowWid = row.window.map { PrivateAPI.cgWindowId(of: $0) } ?? 0
             var hidden = false
@@ -726,7 +754,25 @@ final class SwitcherController: SwitcherViewDelegate {
                     break
                 }
             }
-            if !hidden { result.append(row) }
+            if !hidden {
+                result.append(row)
+                keptPids.insert(row.pid)
+            } else if firstHiddenByPid[row.pid] == nil {
+                firstHiddenByPid[row.pid] = (app: row.app, discovery: discoveryCounter)
+                discoveryCounter += 1
+            }
+        }
+        let placeholders = firstHiddenByPid
+            .filter { !keptPids.contains($0.key) && $0.value.app.activationPolicy == .regular }
+            .map { $0.value }
+            .sorted { $0.discovery < $1.discovery }
+        for placeholder in placeholders {
+            result.append(SwitcherRow(
+                app: placeholder.app,
+                window: nil,
+                windowTitle: "",
+                isMinimized: false
+            ))
         }
         // Drop tombstones whose windows the cache no longer reports — the
         // close has fully propagated, so no further protection needed.
