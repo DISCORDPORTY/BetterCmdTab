@@ -26,6 +26,8 @@ final class HotkeyTap {
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var tapThread: Thread?
+    private var tapRunLoop: CFRunLoop?
     private var layoutObserver: NSObjectProtocol?
 
     private let switchingFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
@@ -78,10 +80,33 @@ final class HotkeyTap {
         }
 
         let src = CFMachPortCreateRunLoopSource(nil, port, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
-        CGEvent.tapEnable(tap: port, enable: true)
+        // Publish tap/source before starting the worker so the callback's
+        // re-enable path sees them on first dispatch.
         tap = port
         runLoopSource = src
+        CGEvent.tapEnable(tap: port, enable: true)
+
+        // Run the tap on a dedicated thread. The main run loop stalls during
+        // startup (per-app AX observer install, cache warmup, prewarm) and
+        // every other point where AX timeouts hold the main thread. When the
+        // tap callback fails to drain within ~1s, the kernel watchdog disables
+        // the tap and the user's keystroke is dropped — exactly what produced
+        // the "first Cmd+Tab after launch does nothing" symptom. A private
+        // run loop on a userInteractive thread isolates the tap from any
+        // main-thread work and keeps Cmd+Tab responsive immediately.
+        let started = DispatchSemaphore(value: 0)
+        let thread = Thread { [weak self] in
+            let loop = CFRunLoopGetCurrent()!
+            CFRunLoopAddSource(loop, src, .commonModes)
+            self?.tapRunLoop = loop
+            started.signal()
+            CFRunLoopRun()
+        }
+        thread.name = "pro.bettercmdtab.HotkeyTap"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+        started.wait()
+        tapThread = thread
 
         loadKeyboardLayout()
         let nc = DistributedNotificationCenter.default()
@@ -96,11 +121,16 @@ final class HotkeyTap {
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
-        if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        if let loop = tapRunLoop {
+            if let runLoopSource {
+                CFRunLoopRemoveSource(loop, runLoopSource, .commonModes)
+            }
+            CFRunLoopStop(loop)
         }
         tap = nil
         runLoopSource = nil
+        tapRunLoop = nil
+        tapThread = nil
         if let obs = layoutObserver {
             DistributedNotificationCenter.default().removeObserver(obs)
             layoutObserver = nil
