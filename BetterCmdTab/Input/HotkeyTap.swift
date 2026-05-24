@@ -27,6 +27,7 @@ final class HotkeyTap {
     private var layoutObserver: NSObjectProtocol?
 
     private let switchingFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
+    private let shiftWasHeld = OSAllocatedUnfairLock<Bool>(initialState: false)
     private let layoutData = OSAllocatedUnfairLock<Data?>(initialState: nil)
 
     private static let tabKey: Int64 = 48
@@ -225,6 +226,16 @@ final class HotkeyTap {
                 }
             }
         } else if type == .flagsChanged {
+            // Detect Shift press transition (off → on) while switcher is open
+            // so the user can step backwards without re-pressing Tab.
+            let wasShift = shiftWasHeld.withLock { current -> Bool in
+                let prev = current
+                current = shiftHeld
+                return prev
+            }
+            if cmdHeld && shiftHeld && !wasShift && isSwitchingNow() {
+                deliver(.prevApp)
+            }
             if !cmdHeld {
                 deliver(.releaseCmd)
             }
