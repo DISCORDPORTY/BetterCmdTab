@@ -7,13 +7,14 @@ final class GeneralSettingsViewController: NSViewController {
     private let launchSwitch = NSSwitch()
     private let accessibilityRow = SettingsRowView(
         title: "Accessibility access",
-        description: "Required to intercept Cmd+Tab and read information about your open windows."
+        description: "Required to intercept the switcher shortcut and read your open windows."
     )
     private let permissionIcon = NSImageView()
     private let permissionButton = NSButton(title: "", target: nil, action: nil)
 
     private let betaSwitch = NSSwitch()
-    private var layoutRadioGroup: SettingsRadioGroupView!
+    private let appRecorder = KeyboardShortcuts.RecorderCocoa(for: .switchApps)
+    private let windowRecorder = KeyboardShortcuts.RecorderCocoa(for: .switchWindows)
 
     private var cancellables = Set<AnyCancellable>()
     private var axTimer: Timer?
@@ -21,44 +22,18 @@ final class GeneralSettingsViewController: NSViewController {
     override func loadView() {
         // Behavior section
         let behavior = SettingsSectionView(header: "Behavior")
-        let launchRow = SettingsRowView(
-            title: "Launch at login",
-            description: "Open BetterCmdTab automatically when you sign in to your Mac.",
-            accessory: launchSwitch
-        )
+        let launchRow = SettingsRowView(title: "Launch at login", accessory: launchSwitch)
         launchSwitch.controlSize = .small
         launchSwitch.target = self
         launchSwitch.action = #selector(toggleLaunchAtLogin(_:))
         behavior.addContent(launchRow)
 
-        // Appearance section
-        let appearance = SettingsSectionView(header: "Appearance")
-        let options: [SettingsRadioGroupView.Option] = [
-            .init(
-                identifier: SwitcherLayoutMode.gridView.rawValue,
-                title: SwitcherLayoutMode.gridView.displayName,
-                subtitle: "Compact grid of large app icons, similar to the macOS Dock."
-            ),
-            .init(
-                identifier: SwitcherLayoutMode.list.rawValue,
-                title: SwitcherLayoutMode.list.displayName,
-                subtitle: "Vertical list pairing each icon with its full application name."
-            ),
-        ]
-        layoutRadioGroup = SettingsRadioGroupView(
-            options: options,
-            selected: Preferences.shared.switcherLayoutMode.rawValue
-        )
-        layoutRadioGroup.onSelectionChange = { identifier in
-            guard let mode = SwitcherLayoutMode(rawValue: identifier) else { return }
-            Preferences.shared.switcherLayoutMode = mode
-        }
-        let layoutBlock = SettingsLabeledBlockView(
-            title: "Switcher Layout",
-            description: "How application icons are arranged when you hold Cmd+Tab.",
-            content: layoutRadioGroup
-        )
-        appearance.addContent(layoutBlock)
+        // Shortcut section — native KeyboardShortcuts recorders. The trigger must
+        // include a hold modifier (Command/Option/Control); Shift is reserved for
+        // reverse-direction stepping and is rejected by the recorder.
+        let shortcut = SettingsSectionView(header: "Shortcut")
+        shortcut.addContent(SettingsRowView(title: "Switch apps", accessory: appRecorder))
+        shortcut.addContent(SettingsRowView(title: "Switch windows", accessory: windowRecorder))
 
         // Permissions section
         let permissions = SettingsSectionView(header: "Permissions")
@@ -90,7 +65,7 @@ final class GeneralSettingsViewController: NSViewController {
         let updates = SettingsSectionView(header: "Update Channel")
         let betaRow = SettingsRowView(
             title: "Include beta releases",
-            description: "Receive pre-release versions as soon as they're available. Beta builds may be unstable.",
+            description: "Beta builds may be unstable.",
             accessory: betaSwitch
         )
         betaSwitch.controlSize = .small
@@ -98,7 +73,7 @@ final class GeneralSettingsViewController: NSViewController {
         betaSwitch.action = #selector(toggleBeta(_:))
         updates.addContent(betaRow)
 
-        view = SettingsLayout.makeScrollingTab(sections: [behavior, appearance, permissions, updates])
+        view = SettingsLayout.makeScrollingTab(sections: [behavior, shortcut, permissions, updates])
     }
 
     override func viewWillAppear() {
@@ -110,8 +85,6 @@ final class GeneralSettingsViewController: NSViewController {
 
         let updater = GitHubUpdater.shared
         betaSwitch.state = updater.includePreReleases ? .on : .off
-
-        applyLayoutMode(Preferences.shared.switcherLayoutMode)
 
         LaunchAtLogin.shared.$isEnabled
             .receive(on: DispatchQueue.main)
@@ -125,11 +98,6 @@ final class GeneralSettingsViewController: NSViewController {
         updater.$includePreReleases
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.betaSwitch.state = $0 ? .on : .off }
-            .store(in: &cancellables)
-
-        Preferences.shared.$switcherLayoutMode
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.applyLayoutMode($0) }
             .store(in: &cancellables)
 
         startAccessibilityPolling()
@@ -152,11 +120,6 @@ final class GeneralSettingsViewController: NSViewController {
 
     @objc private func toggleBeta(_ sender: NSSwitch) {
         GitHubUpdater.shared.includePreReleases = (sender.state == .on)
-    }
-
-    private func applyLayoutMode(_ mode: SwitcherLayoutMode) {
-        guard layoutRadioGroup.selectedIdentifier != mode.rawValue else { return }
-        layoutRadioGroup.select(identifier: mode.rawValue, notify: false)
     }
 
     @objc private func openSystemSettings() {

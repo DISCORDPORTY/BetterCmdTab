@@ -24,6 +24,29 @@ final class HotkeyTap {
 
     var onEvent: (Event) -> Void = { _ in }
 
+    /// Delivered (on main) for every keyDown while a shortcut recorder is active.
+    /// The tap consumes the original event so the system shortcut (e.g. ⌘Tab)
+    /// never fires, then hands the captured event to the recorder.
+    var onRecordingKeyDown: (CGEvent) -> Void = { _ in }
+
+    /// Wraps a CGEvent so it can cross the tap-thread → main hop. CGEvent is a
+    /// thread-safe CF reference; the box just silences Sendable checking.
+    private final class EventBox: @unchecked Sendable {
+        let event: CGEvent
+        init(_ event: CGEvent) { self.event = event }
+    }
+
+    /// User-configurable trigger. Read on the tap thread per-event, written from
+    /// MainActor via `updateConfig` — guarded by a lock like the other tap state.
+    /// App- and window-switch can carry independent hold modifiers (the two
+    /// recorders are independent), so each has its own modifier mask.
+    struct Config {
+        var appModifier: CGEventFlags
+        var appKey: Int64
+        var windowModifier: CGEventFlags
+        var windowKey: Int64
+    }
+
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var tapThread: Thread?
@@ -33,10 +56,16 @@ final class HotkeyTap {
     private let switchingFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
     private let shiftWasHeld = OSAllocatedUnfairLock<Bool>(initialState: false)
     private let layoutData = OSAllocatedUnfairLock<Data?>(initialState: nil)
+    /// When true the tap consumes every keyDown (blocking system shortcuts) and
+    /// forwards it to `onRecordingKeyDown`. Set while a shortcut recorder is
+    /// capturing — required because system-reserved chords like ⌘Tab never reach
+    /// an in-app NSEvent monitor, so the recorder must be fed from the tap.
+    private let recordingFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
+    private let config = OSAllocatedUnfairLock<Config>(
+        initialState: Config(appModifier: .maskCommand, appKey: 48, windowModifier: .maskCommand, windowKey: 50)
+    )
 
-    private static let tabKey: Int64 = 48
     private static let escKey: Int64 = 53
-    private static let backtickKey: Int64 = 50
     private static let leftArrow: Int64 = 123
     private static let rightArrow: Int64 = 124
     private static let downArrow: Int64 = 125
@@ -148,6 +177,18 @@ final class HotkeyTap {
         switchingFlag.withLock { $0 = value }
     }
 
+    /// Enter/leave recording mode. While recording, keyDowns are consumed and
+    /// forwarded to `onRecordingKeyDown` instead of driving the switcher.
+    func setRecording(_ value: Bool) {
+        recordingFlag.withLock { $0 = value }
+    }
+
+    /// Apply user-chosen modifiers + trigger keys. Safe to call any time; the
+    /// tap callback reads the new value on its next event.
+    func updateConfig(_ newConfig: Config) {
+        config.withLock { $0 = newConfig }
+    }
+
     private func isSwitchingNow() -> Bool {
         switchingFlag.withLock { $0 }
     }
@@ -200,23 +241,39 @@ final class HotkeyTap {
             return Unmanaged.passUnretained(event)
         }
 
+        if recordingFlag.withLock({ $0 }) {
+            // Consume keyDowns (so ⌘Tab etc. don't trigger the system switcher)
+            // and forward a copy to the recorder. Let modifier changes through.
+            if type == .keyDown, let copy = event.copy() {
+                let box = EventBox(copy)
+                let handler = onRecordingKeyDown
+                DispatchQueue.main.async { handler(box.event) }
+                return nil
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        let cfg = config.withLock { $0 }
         let flags = event.flags
-        let cmdHeld = flags.contains(.maskCommand)
+        let appModHeld = flags.contains(cfg.appModifier)
+        let windowModHeld = flags.contains(cfg.windowModifier)
+        // The switcher stays open while either trigger's hold modifier is down.
+        let anyModHeld = appModHeld || windowModHeld
         let shiftHeld = flags.contains(.maskShift)
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
         if type == .keyDown {
-            if cmdHeld && keyCode == Self.tabKey {
+            if appModHeld && keyCode == cfg.appKey {
                 let dir: Event = shiftHeld ? .prevApp : .nextApp
                 deliver(dir)
                 return nil
             }
-            if cmdHeld && keyCode == Self.backtickKey {
+            if windowModHeld && keyCode == cfg.windowKey {
                 let dir: Event = shiftHeld ? .prevWindow : .nextWindow
                 deliver(dir)
                 return nil
             }
-            if cmdHeld && keyCode == Self.escKey {
+            if anyModHeld && keyCode == Self.escKey {
                 deliver(.escape)
                 return nil
             }
@@ -265,10 +322,10 @@ final class HotkeyTap {
                 current = shiftHeld
                 return prev
             }
-            if cmdHeld && shiftHeld && !wasShift && isSwitchingNow() {
+            if anyModHeld && shiftHeld && !wasShift && isSwitchingNow() {
                 deliver(.prevApp)
             }
-            if !cmdHeld {
+            if !anyModHeld {
                 deliver(.releaseCmd)
             }
         }
