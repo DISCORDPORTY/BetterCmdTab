@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import os
 
 @MainActor
@@ -52,7 +53,11 @@ final class SwitcherController: SwitcherViewDelegate {
     /// landing stale rows after a fresh reveal.
     private var revealGeneration: UInt64 = 0
 
-    let revealDelay: TimeInterval = 0.100
+    private var cancellables = Set<AnyCancellable>()
+
+    /// Tap-vs-hold threshold, user-tunable. Read live so a settings change takes
+    /// effect on the next chord without restart.
+    var revealDelay: TimeInterval { Double(Preferences.shared.revealDelayMs) / 1000.0 }
 
     init() {
         view = SwitcherView(frame: .zero)
@@ -82,11 +87,46 @@ final class SwitcherController: SwitcherViewDelegate {
                 self?.handleScreenParametersChange()
             }
         }
+        // Prune the visible panel the moment an app actually terminates. The
+        // post-action refresh is a fixed 250ms guess that misses apps which
+        // quit slowly (confirmation dialog, slow teardown) — their row lingered
+        // until the next reveal. This removes it exactly when the app is gone.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
+            Task { @MainActor [weak self] in
+                guard let self, let pid else { return }
+                self.handleAppTerminated(pid: pid)
+            }
+        }
+    }
+
+    private func handleAppTerminated(pid: pid_t) {
+        guard phase == .visible, rows.contains(where: { $0.pid == pid }) else { return }
+        let selectedKey: (pid_t, String, Bool)? = rows.indices.contains(index)
+            ? (rows[index].pid, rows[index].windowTitle, rows[index].window != nil)
+            : nil
+        rows.removeAll { $0.pid == pid }
+        if rows.isEmpty {
+            cancel()
+            return
+        }
+        labels = RowLabels.labels(for: rows)
+        if let key = selectedKey,
+           let restored = rows.firstIndex(where: { $0.pid == key.0 && $0.windowTitle == key.1 && ($0.window != nil) == key.2 }) {
+            index = restored
+        } else {
+            index = min(index, rows.count - 1)
+        }
+        applyPrefixReorder()
     }
 
     private func handleScreenParametersChange() {
         guard phase == .visible, !rows.isEmpty else { return }
-        currentMetrics = SwitcherMetrics.forScreen(SwitcherPanel.preferredScreen(), layoutMode: Preferences.shared.switcherLayoutMode)
+        currentMetrics = SwitcherMetrics.forScreen(SwitcherPanel.preferredScreen(), layoutMode: Preferences.shared.switcherLayoutMode, userScale: Preferences.shared.panelSize.scale)
         view.configure(rows: rows, labels: labels, selectedIndex: index, metrics: currentMetrics, highlightPrefix: letterBuffer)
         panel.present()
     }
@@ -104,9 +144,68 @@ final class SwitcherController: SwitcherViewDelegate {
             guard let self else { return }
             self.handle(event)
         }
+        // While recording, the tap consumes the chord and hands it back here as a
+        // CGEvent. Re-post it as an NSEvent so the active RecorderCocoa (which
+        // listens via an in-app monitor) captures it — system-reserved combos
+        // like ⌘Tab never reach that monitor on their own.
+        hotkey.onRecordingKeyDown = { cgEvent in
+            guard let nsEvent = NSEvent(cgEvent: cgEvent) else { return }
+            NSApp.postEvent(nsEvent, atStart: true)
+        }
+        pushHotkeyConfig()
+        // The KeyboardShortcuts recorders persist the user's trigger choices and
+        // post this notification on change — re-derive the tap config live.
+        NotificationCenter.default.publisher(
+            for: Notification.Name("KeyboardShortcuts_shortcutByNameDidChange")
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in self?.pushHotkeyConfig() }
+        .store(in: &cancellables)
+        // Put the tap into recording mode while a recorder is capturing so the
+        // chord is forwarded to the recorder instead of triggering the switcher.
+        NotificationCenter.default.publisher(
+            for: Notification.Name("KeyboardShortcuts_recorderActiveStatusDidChange")
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] note in
+            let active = (note.userInfo?["isActive"] as? Bool) ?? false
+            self?.hotkey.setRecording(active)
+        }
+        .store(in: &cancellables)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.prewarmPanel()
         }
+    }
+
+    private func pushHotkeyConfig() {
+        let app = Self.hotkeyTrigger(for: .switchApps, defaultKey: 48)
+        let window = Self.hotkeyTrigger(for: .switchWindows, defaultKey: 50)
+        hotkey.updateConfig(HotkeyTap.Config(
+            appModifier: app.modifier,
+            appKey: app.key,
+            windowModifier: window.modifier,
+            windowKey: window.key
+        ))
+    }
+
+    /// Decompose a recorded shortcut into a held modifier mask + tap keycode for
+    /// the CGEvent tap. Falls back to Command + `defaultKey` when unset. Shift is
+    /// dropped (reserved for reverse stepping); a hold modifier is guaranteed
+    /// because the recorder rejects shortcuts without one.
+    private static func hotkeyTrigger(
+        for name: KeyboardShortcuts.Name,
+        defaultKey: Int64
+    ) -> (modifier: CGEventFlags, key: Int64) {
+        guard let shortcut = KeyboardShortcuts.getShortcut(for: name) else {
+            return (.maskCommand, defaultKey)
+        }
+        var flags: CGEventFlags = []
+        let modifiers = shortcut.modifiers
+        if modifiers.contains(.command) { flags.insert(.maskCommand) }
+        if modifiers.contains(.option) { flags.insert(.maskAlternate) }
+        if modifiers.contains(.control) { flags.insert(.maskControl) }
+        if flags.isEmpty { flags = .maskCommand }
+        return (flags, Int64(shortcut.carbonKeyCode))
     }
 
     private var phase: Phase {
@@ -465,7 +564,7 @@ final class SwitcherController: SwitcherViewDelegate {
         }
         guard !rows.isEmpty else { cancel(); return }
 
-        currentMetrics = SwitcherMetrics.forScreen(SwitcherPanel.preferredScreen(), layoutMode: Preferences.shared.switcherLayoutMode)
+        currentMetrics = SwitcherMetrics.forScreen(SwitcherPanel.preferredScreen(), layoutMode: Preferences.shared.switcherLayoutMode, userScale: Preferences.shared.panelSize.scale)
         view.configure(rows: rows, labels: labels, selectedIndex: index, metrics: currentMetrics, highlightPrefix: letterBuffer)
         panel.present()
         phase = .visible
@@ -512,7 +611,7 @@ final class SwitcherController: SwitcherViewDelegate {
         let delta = windowsOnlyPrimedDelta
         index = count > 0 ? ((delta % count) + count) % count : 0
 
-        currentMetrics = SwitcherMetrics.forScreen(SwitcherPanel.preferredScreen(), layoutMode: Preferences.shared.switcherLayoutMode)
+        currentMetrics = SwitcherMetrics.forScreen(SwitcherPanel.preferredScreen(), layoutMode: Preferences.shared.switcherLayoutMode, userScale: Preferences.shared.panelSize.scale)
         view.configure(rows: rows, labels: labels, selectedIndex: index, metrics: currentMetrics, highlightPrefix: letterBuffer)
         panel.present()
         phase = .visible
