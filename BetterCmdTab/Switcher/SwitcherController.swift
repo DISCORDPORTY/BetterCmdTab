@@ -737,17 +737,33 @@ final class SwitcherController: SwitcherViewDelegate {
         revealGeneration &+= 1
         let gen = revealGeneration
 
-        var filtered = cache.rows(orderedBy: mru.order).filter { $0.pid == pid }
-        if filtered.isEmpty {
-            filtered = AppCatalog.snapshot(orderedBy: mru.order).filter { $0.pid == pid }
+        let cached = cache.rows(orderedBy: mru.order).filter { $0.pid == pid }
+        if !cached.isEmpty {
+            guard cached.contains(where: { $0.window != nil }) else { cancel(); return }
+            presentWindowsOnly(cached, pid: pid)
+            scheduleWindowsOnlyRefresh(pid: pid, gen: gen)
+        } else {
+            // Cold cache — the full AX scan is expensive, so run it off the main
+            // thread and present (or cancel) when it returns instead of stalling
+            // the reveal. A fast chord that releases ⌘ before this lands commits
+            // through `pickWindowsOnlyTarget` (primed phase); the generation
+            // guard drops this stale apply.
+            let mruOrder = mru.order
+            DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                let fresh = AppCatalog.snapshot(orderedBy: mruOrder).filter { $0.pid == pid }
+                DispatchQueue.main.async {
+                    guard let self, gen == self.revealGeneration, self.phase == .primed else { return }
+                    guard fresh.contains(where: { $0.window != nil }) else { self.cancel(); return }
+                    self.presentWindowsOnly(fresh, pid: pid)
+                    self.scheduleWindowsOnlyRefresh(pid: pid, gen: gen)
+                }
+            }
         }
-        let hasWindow = filtered.contains { $0.window != nil }
-        if !hasWindow {
-            cancel()
-            return
-        }
-        filtered = windowMRU.sortRows(filtered, forPid: pid)
-        baseRows = filtered
+    }
+
+    private func presentWindowsOnly(_ filtered: [SwitcherRow], pid: pid_t) {
+        let sorted = windowMRU.sortRows(filtered, forPid: pid)
+        baseRows = sorted
         baseLabels = RowLabels.labels(for: baseRows)
         rows = baseRows
         labels = baseLabels
@@ -760,7 +776,9 @@ final class SwitcherController: SwitcherViewDelegate {
         panel.present()
         phase = .visible
         cache.setPanelVisible(true)
+    }
 
+    private func scheduleWindowsOnlyRefresh(pid: pid_t, gen: UInt64) {
         cache.scheduleFullRefresh { [weak self] in
             guard let self, gen == self.revealGeneration else { return }
             let fresh = self.cache.rows(orderedBy: self.mru.order).filter { $0.pid == pid }
