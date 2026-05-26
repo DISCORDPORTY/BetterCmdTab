@@ -11,7 +11,7 @@ final class AppCatalogCache {
     private(set) var entries: [pid_t: AppCacheEntry] = [:]
     private var pendingRefresh = false
     private var pendingBumps: Set<pid_t> = []
-    /// Per-pid serialization for `bumpApp`. `snapshotQueue` is concurrent, so
+    /// Per-pid serialization for `bumpApps`. `snapshotQueue` is concurrent, so
     /// two bumps for the same pid can race — and since later snapshots can
     /// finish *before* earlier ones, the stale completion overwrites fresh
     /// data and the cache gets stuck (e.g. burst of 10 window creates ends
@@ -111,12 +111,18 @@ final class AppCatalogCache {
                 }
             }
         }
-        let sorted = result.enumerated().sorted { lhs, rhs in
-            let pa = Self.statusPriority(lhs.element)
-            let pb = Self.statusPriority(rhs.element)
-            if pa != pb { return pa < pb }
-            return lhs.offset < rhs.offset
-        }.map { $0.element }
+        // Compute each row's status bucket once — `statusPriority` reads the
+        // live `app.isHidden` (an ObjC call) — then sort the precomputed keys.
+        // The old comparator called it twice per comparison (O(n log n) ObjC
+        // queries); decorating up front makes it O(n). Tie-break on the
+        // original offset keeps the order byte-identical to before.
+        let sorted = result.enumerated()
+            .map { (priority: Self.statusPriority($0.element), offset: $0.offset, row: $0.element) }
+            .sorted { lhs, rhs in
+                if lhs.priority != rhs.priority { return lhs.priority < rhs.priority }
+                return lhs.offset < rhs.offset
+            }
+            .map { $0.row }
         return CatalogFilter.filteredRows(sorted, CatalogFilter.config())
     }
 
@@ -208,7 +214,7 @@ final class AppCatalogCache {
                 guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
                 let pid = app.processIdentifier
                 Task { @MainActor [weak self] in
-                    self?.bumpApp(pid: pid)
+                    self?.scheduleBumpApp(pid: pid)
                 }
             }
             observers.append(obs)
@@ -228,7 +234,7 @@ final class AppCatalogCache {
             let pid = app.processIdentifier
             Task { @MainActor [weak self] in
                 self?.installAXObserver(forPid: pid)
-                self?.bumpApp(pid: pid)
+                self?.scheduleBumpApp(pid: pid)
             }
         }
         observers.append(launchObs)
@@ -307,9 +313,12 @@ final class AppCatalogCache {
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
     }
 
-    /// Coalesces AX notification storms — bursts of `kAXTitleChanged` or rapid
-    /// window creation collapse to a single bumpApp call within the next run
-    /// loop tick.
+    /// Coalesces bump requests — an app-switch (deactivate + activate), an AX
+    /// notification storm (bursts of window create/destroy), and workspace
+    /// hide/unhide/launch events that all land in the same run-loop tick fold
+    /// into a single `bumpApps` call. That call takes exactly one shared
+    /// `CGWindowListCopyWindowInfo` snapshot for the whole batch instead of one
+    /// per pid, so a 5-app storm costs one full-system window-list copy, not 5.
     private func scheduleBumpApp(pid: pid_t) {
         let wasEmpty = pendingBumps.isEmpty
         pendingBumps.insert(pid)
@@ -318,57 +327,103 @@ final class AppCatalogCache {
                 guard let self else { return }
                 let toBump = self.pendingBumps
                 self.pendingBumps.removeAll()
-                for p in toBump { self.bumpApp(pid: p) }
+                self.bumpApps(pids: toBump)
             }
         }
     }
 
-    func bumpApp(pid: pid_t) {
-        // Self is no longer force-removed: as an accessory app it only earns a
-        // cache entry when it has a window (the Settings window). Showing/hiding
-        // the borderless switcher panel yields no standard window, so a self
-        // bump just clears the entry again.
-        if pidBumpInFlight.contains(pid) {
-            pidBumpPending.insert(pid)
-            return
+    /// Refresh the cached window inventory for a set of pids off one shared CG
+    /// snapshot. Self is no longer force-removed: as an accessory app it only
+    /// earns a cache entry when it has a window (the Settings window). Showing/
+    /// hiding the borderless switcher panel yields no standard window, so a
+    /// self bump just clears the entry again.
+    func bumpApps(pids: Set<pid_t>) {
+        guard !pids.isEmpty else { return }
+        // Resolve policy and reserve in-flight slots on main. Pids already in
+        // flight collapse into the pending set and re-run when the current scan
+        // lands. Value-type `plan` crosses to the snapshot queue; the
+        // `apps`/`accessoryPids` lookups stay main-only (read in the completion).
+        var plan: [(pid: pid_t, isRegular: Bool)] = []
+        plan.reserveCapacity(pids.count)
+        var apps: [pid_t: NSRunningApplication] = [:]
+        var accessoryPids = Set<pid_t>()
+        for pid in pids {
+            if pidBumpInFlight.contains(pid) {
+                pidBumpPending.insert(pid)
+                continue
+            }
+            // Direct pid lookup instead of scanning the whole running-app list;
+            // `NSRunningApplication(processIdentifier:)` is O(1) and always
+            // reflects the current process table.
+            guard let app = NSRunningApplication(processIdentifier: pid) else {
+                entries.removeValue(forKey: pid)
+                continue
+            }
+            let policy = app.activationPolicy
+            guard policy == .regular || policy == .accessory else {
+                entries.removeValue(forKey: pid)
+                continue
+            }
+            pidBumpInFlight.insert(pid)
+            apps[pid] = app
+            if policy == .accessory { accessoryPids.insert(pid) }
+            plan.append((pid, policy == .regular))
         }
-        // Direct pid lookup instead of scanning the whole running-app list on
-        // every AX-notification-driven bump; `NSRunningApplication(processIdentifier:)`
-        // is O(1) and always reflects the current process table.
-        guard let app = NSRunningApplication(processIdentifier: pid) else {
-            entries.removeValue(forKey: pid)
-            return
-        }
-        let policy = app.activationPolicy
-        guard policy == .regular || policy == .accessory else {
-            entries.removeValue(forKey: pid)
-            return
-        }
-        let isRegular = policy == .regular
-        pidBumpInFlight.insert(pid)
+        guard !plan.isEmpty else { return }
+
         snapshotQueue.async { [weak self] in
             let cgSnapshot = WindowEnumerator.snapshotCGWindowMap()
-            let windows = WindowEnumerator.windows(
-                forPid: pid,
-                isRegularApp: isRegular,
-                expectedCGWindowIDs: cgSnapshot.ids(for: pid),
-                cgZOrder: cgSnapshot.zOrder(for: pid)
-            )
+            let count = plan.count
+            var windowsBuffer = [[WindowInfo]](repeating: [], count: count)
+            if count == 1 {
+                let item = plan[0]
+                windowsBuffer[0] = WindowEnumerator.windows(
+                    forPid: item.pid,
+                    isRegularApp: item.isRegular,
+                    expectedCGWindowIDs: cgSnapshot.ids(for: item.pid),
+                    cgZOrder: cgSnapshot.zOrder(for: item.pid)
+                )
+            } else {
+                // Parallelize the per-pid AX scans (each blocks on AX timeouts)
+                // while still sharing the single CG snapshot above.
+                windowsBuffer.withUnsafeMutableBufferPointer { buffer in
+                    nonisolated(unsafe) let bufferRef = buffer
+                    DispatchQueue.concurrentPerform(iterations: count) { i in
+                        let item = plan[i]
+                        bufferRef[i] = WindowEnumerator.windows(
+                            forPid: item.pid,
+                            isRegularApp: item.isRegular,
+                            expectedCGWindowIDs: cgSnapshot.ids(for: item.pid),
+                            cgZOrder: cgSnapshot.zOrder(for: item.pid)
+                        )
+                    }
+                }
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.pidBumpInFlight.remove(pid)
-                if policy == .regular {
-                    self.entries[pid] = AppCacheEntry(app: app, windows: windows)
-                } else if policy == .accessory, !windows.isEmpty {
-                    self.entries[pid] = AppCacheEntry(app: app, windows: windows)
-                } else {
-                    self.entries.removeValue(forKey: pid)
+                var rebump = Set<pid_t>()
+                for i in 0..<count {
+                    let pid = plan[i].pid
+                    let windows = windowsBuffer[i]
+                    self.pidBumpInFlight.remove(pid)
+                    if let app = apps[pid] {
+                        if plan[i].isRegular {
+                            self.entries[pid] = AppCacheEntry(app: app, windows: windows)
+                        } else if accessoryPids.contains(pid), !windows.isEmpty {
+                            self.entries[pid] = AppCacheEntry(app: app, windows: windows)
+                        } else {
+                            self.entries.removeValue(forKey: pid)
+                        }
+                    }
+                    // Re-bump if another request landed while in flight —
+                    // captures AX state that changed between scan and
+                    // completion (typical during rapid window-creation bursts).
+                    if self.pidBumpPending.remove(pid) != nil {
+                        rebump.insert(pid)
+                    }
                 }
-                // Re-bump if another request landed while we were in flight —
-                // captures any AX state change that happened between scan and
-                // completion (typical during rapid window creation bursts).
-                if self.pidBumpPending.remove(pid) != nil {
-                    self.bumpApp(pid: pid)
+                if !rebump.isEmpty {
+                    self.bumpApps(pids: rebump)
                 }
             }
         }

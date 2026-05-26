@@ -103,12 +103,18 @@ enum AppCatalog {
             }
         }
 
-        let sorted = rows.enumerated().sorted { lhs, rhs in
-            let pa = Self.statusPriority(lhs.element)
-            let pb = Self.statusPriority(rhs.element)
-            if pa != pb { return pa < pb }
-            return lhs.offset < rhs.offset
-        }.map { $0.element }
+        // Compute each row's status bucket once — `statusPriority` reads the
+        // live `app.isHidden` (an ObjC call) — then sort the precomputed keys.
+        // The old comparator called it twice per comparison (O(n log n) ObjC
+        // queries); decorating up front makes it O(n). Tie-break on the
+        // original offset keeps the order byte-identical to before.
+        let sorted = rows.enumerated()
+            .map { (priority: Self.statusPriority($0.element), offset: $0.offset, row: $0.element) }
+            .sorted { lhs, rhs in
+                if lhs.priority != rhs.priority { return lhs.priority < rhs.priority }
+                return lhs.offset < rhs.offset
+            }
+            .map { $0.row }
         return CatalogFilter.filteredRows(sorted, CatalogFilter.config())
     }
 
