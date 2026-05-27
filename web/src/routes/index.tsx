@@ -29,12 +29,13 @@ const inView = {
 } as const;
 
 const shots: Array<[string, string]> = [
-  ["/screenshots/list.jpg", "Classic vertical list"],
+  ["/screenshots/preview.jpg", "Live window previews"],
   ["/screenshots/grid.jpg", "Grid of app icons"],
+  ["/screenshots/list.jpg", "Classic vertical list"],
 ];
 
 const features: Array<[string, string]> = [
-  ["Two layouts", "classic list, or a grid of icons"],
+  ["Three layouts", "classic list, grid of icons, or live window previews"],
   ["Letter-prefix jump", "type a name to jump to it"],
   ["Search & launch", "press / to fuzzy-find, or launch any installed app"],
   ["Window switching", "Cmd+` cycles windows of the front app"],
