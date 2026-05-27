@@ -1,4 +1,5 @@
 import AppKit
+import BetterShortcuts
 import Combine
 import os
 
@@ -200,10 +201,10 @@ final class SwitcherController: SwitcherViewDelegate {
             NSApp.postEvent(nsEvent, atStart: true)
         }
         pushHotkeyConfig()
-        // The KeyboardShortcuts recorders persist the user's trigger choices and
+        // The BetterShortcuts recorders persist the user's trigger choices and
         // post this notification on change — re-derive the tap config live.
         NotificationCenter.default.publisher(
-            for: Notification.Name("KeyboardShortcuts_shortcutByNameDidChange")
+            for: Notification.Name("BetterShortcuts_shortcutByNameDidChange")
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in self?.pushHotkeyConfig() }
@@ -211,7 +212,7 @@ final class SwitcherController: SwitcherViewDelegate {
         // Put the tap into recording mode while a recorder is capturing so the
         // chord is forwarded to the recorder instead of triggering the switcher.
         NotificationCenter.default.publisher(
-            for: Notification.Name("KeyboardShortcuts_recorderActiveStatusDidChange")
+            for: Notification.Name("BetterShortcuts_recorderActiveStatusDidChange")
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] note in
@@ -319,10 +320,10 @@ final class SwitcherController: SwitcherViewDelegate {
     /// dropped (reserved for reverse stepping); a hold modifier is guaranteed
     /// because the recorder rejects shortcuts without one.
     private static func hotkeyTrigger(
-        for name: KeyboardShortcuts.Name,
+        for name: BetterShortcuts.Name,
         defaultKey: Int64
     ) -> (modifier: CGEventFlags, key: Int64) {
-        guard let shortcut = KeyboardShortcuts.getShortcut(for: name) else {
+        guard let shortcut = BetterShortcuts.getShortcut(for: name) else {
             return (.maskCommand, defaultKey)
         }
         var flags: CGEventFlags = []

@@ -1,0 +1,15 @@
+{
+  "originHash" : "5178e2a036a5e22c952f33d1126e92c6fc4195654b74dce117feeb14a1f4ddf7",
+  "pins" : [
+    {
+      "identity" : "bettershortcuts",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/rokartur/BetterShortcuts.git",
+      "state" : {
+        "revision" : "e1d5988ebd5a41b76be66c6cf897c609245f6477",
+        "version" : "0.1.1"
+      }
+    }
+  ],
+  "version" : 3
+}

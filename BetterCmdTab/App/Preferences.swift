@@ -120,8 +120,8 @@ enum PanelSize: String, CaseIterable {
 final class Preferences: ObservableObject {
     static let shared = Preferences()
 
-    // Trigger keys are stored by the KeyboardShortcuts library
-    // (see KeyboardShortcuts.Name.switchApps / .switchWindows), not here.
+    // Trigger keys are stored by the BetterShortcuts package
+    // (see BetterShortcuts.Name.switchApps / .switchWindows), not here.
 
     static let defaultRevealDelayMs = 100
     static let revealDelayRange: ClosedRange<Int> = 40...500

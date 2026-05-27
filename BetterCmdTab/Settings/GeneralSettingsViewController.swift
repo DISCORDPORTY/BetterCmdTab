@@ -1,4 +1,5 @@
 import AppKit
+import BetterShortcuts
 import Combine
 
 @MainActor
@@ -17,8 +18,8 @@ final class GeneralSettingsViewController: NSViewController {
     private let permissionIcon = NSImageView()
     private let permissionButton = NSButton(title: "", target: nil, action: nil)
 
-    private let appRecorder = KeyboardShortcuts.RecorderCocoa(for: .switchApps)
-    private let windowRecorder = KeyboardShortcuts.RecorderCocoa(for: .switchWindows)
+    private let appRecorder = BetterShortcuts.RecorderCocoa(for: .switchApps)
+    private let windowRecorder = BetterShortcuts.RecorderCocoa(for: .switchWindows)
 
     private var cancellables = Set<AnyCancellable>()
     private var axTimer: Timer?
@@ -39,7 +40,7 @@ final class GeneralSettingsViewController: NSViewController {
             accessory: hideMenuBarSwitch
         ))
 
-        // Shortcuts section — native KeyboardShortcuts recorders. The trigger must
+        // Shortcuts section — native BetterShortcuts recorders. The trigger must
         // include a hold modifier (Command/Option/Control); Shift is reserved for
         // reverse-direction stepping and is rejected by the recorder.
         let shortcuts = SettingsSectionView(header: "Shortcuts")
