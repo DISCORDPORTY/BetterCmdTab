@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/rokartur/BetterUpdater.git",
       "state" : {
-        "revision" : "6986779a99dc51ff4f18fe1cc5ad3f92f7766f7e",
-        "version" : "0.2.0"
+        "revision" : "f52c1c9ca4f878f7185aa7e341e679d6f706451d",
+        "version" : "0.2.1"
       }
     },
     {
