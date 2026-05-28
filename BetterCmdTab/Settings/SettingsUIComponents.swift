@@ -94,9 +94,12 @@ final class SettingsRadioGroupView: NSView {
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            horizontal
-                ? stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor)
-                : stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            // Pin trailing exactly in both orientations so the group's width
+            // tracks its content. A `lessThanOrEqualTo` here let a horizontal
+            // group stretch to fill the row, leaving the options jammed against
+            // the title with no gap; an exact pin lets the row's spacer push the
+            // options to the trailing edge instead.
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
@@ -500,131 +503,5 @@ final class CapsulePillView: NSView {
             context.allowsImplicitAnimation = true
             apply()
         }
-    }
-}
-
-// MARK: - Quick link card (About tab)
-
-@MainActor
-final class QuickLinkCardView: NSView {
-
-    private let url: URL
-    private let iconView = NSImageView()
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let arrowView = NSImageView()
-
-    private var trackingArea: NSTrackingArea?
-    private var isHovering = false {
-        didSet { updateAppearance() }
-    }
-
-    init(title: String, iconName: String, url: URL) {
-        self.url = url
-        super.init(frame: .zero)
-        setup(title: title, iconName: iconName)
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
-
-    private func setup(title: String, iconName: String) {
-        wantsLayer = true
-        layer?.masksToBounds = true
-        translatesAutoresizingMaskIntoConstraints = false
-
-        titleLabel.stringValue = title
-        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        titleLabel.textColor = .secondaryLabelColor
-        titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.maximumNumberOfLines = 1
-        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        if let iconImage = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold)) {
-            iconView.image = iconImage
-        }
-        iconView.contentTintColor = .tertiaryLabelColor
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-
-        if let arrowImage = NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold)) {
-            arrowView.image = arrowImage
-        }
-        arrowView.contentTintColor = .quaternaryLabelColor
-        arrowView.translatesAutoresizingMaskIntoConstraints = false
-        arrowView.setContentHuggingPriority(.required, for: .horizontal)
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let stack = NSStackView(views: [iconView, titleLabel, spacer, arrowView])
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 9),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
-        ])
-
-        updateAppearance()
-    }
-
-    override func layout() {
-        super.layout()
-        layer?.cornerRadius = 10
-        layer?.cornerCurve = .continuous
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateAppearance()
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let existing = trackingArea {
-            removeTrackingArea(existing)
-            trackingArea = nil
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
-        isHovering = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        isHovering = false
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        super.mouseUp(with: event)
-        let location = convert(event.locationInWindow, from: nil)
-        if bounds.contains(location) {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    private func updateAppearance() {
-        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let baseAlpha: CGFloat = dark ? (isHovering ? 0.06 : 0.03) : (isHovering ? 0.05 : 0.02)
-        let base: NSColor = dark ? .white : .black
-        layer?.backgroundColor = base.withAlphaComponent(baseAlpha).cgColor
-        layer?.borderWidth = AppKitSectionChrome.borderWidth
-        layer?.borderColor = AppKitSectionChrome.borderColor(for: effectiveAppearance).cgColor
     }
 }
