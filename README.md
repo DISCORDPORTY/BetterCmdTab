@@ -40,6 +40,7 @@ macOS's built-in ⌘+Tab switches apps, not windows. Third-party alternatives ei
 ## Features
 
 - **Three layouts** — classic list, grid of icons, or live window previews.
+- **Window titles** — show each window's title under its icon in Grid and Previews.
 - **Letter-prefix jump** — type a name to jump to it.
 - **Search & launch** — press `/` to fuzzy-find, or launch any installed app.
 - **Window switching** — `` ⌘+ ` `` cycles windows of the front app.
@@ -48,14 +49,17 @@ macOS's built-in ⌘+Tab switches apps, not windows. Third-party alternatives ei
 - **Recently closed** — reopen an app you just quit.
 - **Minimized & hidden** — include minimized windows, hidden and windowless apps.
 - **Pin & filter** — keep favorites up top, hide the rest.
-- **Quick actions** — quit, close, minimize, hide inline.
+- **Quick actions** — quit, close, minimize, maximize, hide inline.
+- **Move windows** — send the highlighted window to the next display.
+- **App hotkeys** — assign a shortcut to focus or launch a chosen app.
 - **Unread badges** — Dock badge counts, in the switcher.
 - **Audio indicator** — flags apps playing sound.
 - **Instant Spaces** — switch Spaces with no animation.
+- **Current Space only** — show just the windows on the Space you're on.
 - **Liquid Glass** — system material on macOS 26.
-- **Accent color** — tint the selection to match your system.
+- **Theming** — panel opacity, corner radius, and a custom accent color.
 - **Multi-monitor** — opens on the screen under the cursor.
-- **Trackpad & haptics** — three-finger swipe, optional feedback.
+- **Trackpad & haptics** — three-finger swipe to open the switcher or switch Spaces, optional feedback.
 - **Configurable** — custom hotkey, size, scale, layout.
 
 ## Install
@@ -94,10 +98,11 @@ While Cmd is held:
 | `Cmd + W` | Close the highlighted window |
 | `Cmd + M` | Minimize the highlighted window |
 | `Cmd + H` | Hide / unhide the highlighted app |
+| `Cmd + Option + ←/→/↑/↓` | Move the highlighted window to the adjacent display |
 | `Cmd + Esc` | Cancel switcher without activating anything |
 | `Release Cmd` | Activate the highlighted row |
 
-The `Cmd + Tab` activation hotkey is configurable in Settings; you can also trigger the switcher with a three-finger trackpad swipe.
+The `Cmd + Tab` activation hotkey is configurable in Settings; you can also trigger the switcher with a three-finger trackpad swipe. Separately, you can assign a global shortcut per app slot to jump straight to (or launch) a chosen app without opening the switcher.
 
 ## Requirements
 
