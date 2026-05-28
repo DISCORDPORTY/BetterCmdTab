@@ -33,10 +33,6 @@ Fast · Native · Liquid Glass · Zero telemetry · Free forever
 
 </div>
 
-## Why
-
-macOS's built-in ⌘+Tab switches apps, not windows. Third-party alternatives either cost money (Witch, Contexts) or feel heavy and have not adopted Liquid Glass. BetterCmdTab is a single menu-bar agent that boots in milliseconds, draws with the system Liquid Glass material on macOS 26, and ships with no subscription, no license key, and no analytics.
-
 ## Features
 
 - **Three layouts** — classic list, grid of icons, or live window previews.
