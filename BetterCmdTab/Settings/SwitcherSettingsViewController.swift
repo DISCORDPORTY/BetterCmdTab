@@ -36,6 +36,7 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
     private let hoverMaximizeSwitch = NSSwitch()
     private let hoverHideSwitch = NSSwitch()
     private let hoverQuitSwitch = NSSwitch()
+    private let hoverForceQuitSwitch = NSSwitch()
 
     // Apps
     private let excludedButton = NSButton(title: "Manage apps", target: nil, action: nil)
@@ -136,6 +137,10 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
         addRow(to: actions, title: "Hide app", accessory: hoverHideSwitch)
         configureSwitch(hoverQuitSwitch, action: #selector(toggleHoverQuit(_:)))
         addRow(to: actions, title: "Quit app", accessory: hoverQuitSwitch)
+        configureSwitch(hoverForceQuitSwitch, action: #selector(toggleHoverForceQuit(_:)))
+        addRow(to: actions, title: "Force quit app",
+               subtitle: "Sends SIGKILL — for hung apps that ignore Quit. ⌘+⌥+Q always works regardless.",
+               accessory: hoverForceQuitSwitch)
 
         // App lists section — exclusion and pinning, each via a picker sheet.
         let appLists = addSection(title: "Apps", anchor: SettingsAnchor.apps)
@@ -187,6 +192,7 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
         hoverMaximizeSwitch.state = prefs.hoverShowMaximize ? .on : .off
         hoverHideSwitch.state = prefs.hoverShowHide ? .on : .off
         hoverQuitSwitch.state = prefs.hoverShowQuit ? .on : .off
+        hoverForceQuitSwitch.state = prefs.hoverShowForceQuit ? .on : .off
         setHoverSubOptionsEnabled(prefs.hoverActionsEnabled)
         updateAppListCounts()
 
@@ -278,6 +284,10 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
         Preferences.shared.hoverShowQuit = (sender.state == .on)
     }
 
+    @objc private func toggleHoverForceQuit(_ sender: NSSwitch) {
+        Preferences.shared.hoverShowForceQuit = (sender.state == .on)
+    }
+
     /// The per-button toggles only matter while hover actions are enabled.
     private func setHoverSubOptionsEnabled(_ enabled: Bool) {
         hoverCloseSwitch.isEnabled = enabled
@@ -285,6 +295,7 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
         hoverMaximizeSwitch.isEnabled = enabled
         hoverHideSwitch.isEnabled = enabled
         hoverQuitSwitch.isEnabled = enabled
+        hoverForceQuitSwitch.isEnabled = enabled
     }
 
     @objc private func toggleRecentlyClosed(_ sender: NSSwitch) {

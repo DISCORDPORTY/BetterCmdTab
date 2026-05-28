@@ -2,35 +2,60 @@ import AppKit
 
 @MainActor
 enum IconCache {
-    private static let capacity = 64
+    /// Hard cap on cached entries per cache. Halved from 64 → 32 once
+    /// `prewarm` was dropped: cache fills on demand, not all at launch, so
+    /// the working set in steady state is closer to "apps the user actually
+    /// invokes" than "every running process".
+    private static let capacity = 32
     /// Edge length (px) of the flattened raster we cache. Sized just above the
-    /// largest on-screen icon — the grid tile at max scale (64pt × 1.8 screen
-    /// clamp × 1.2 "Large") is ~138pt → ~276px on a 2x Mac, and macOS has no
-    /// >2x backing scale — so the image view only ever downscales, staying
-    /// crisp, while keeping the per-entry footprint as small as possible.
-    nonisolated private static let renderEdge = 320
-    /// Byte cost of one flattened entry (used as the NSCache cost). A 320² RGBA
-    /// bitmap is ~410 KB, so the cap doubles as a real memory ceiling.
-    nonisolated private static let bytesPerImage = renderEdge * renderEdge * 4
+    /// largest *typical* on-screen tile: the default "Medium" panel scale
+    /// renders icons at ~77pt → 154px on a 2x Mac, and "Large" pushes the
+    /// tile to ~190px. 256 keeps the largest case crisp while shaving 36%
+    /// off the per-entry RAM (320² → 256²).
+    private static let renderEdge = 256
+    /// Byte cost of one flattened entry (used as the NSCache cost). A 256²
+    /// RGBA bitmap is ~262 KB, so the cap doubles as a real memory ceiling
+    /// (~8 MB per cache, ~16 MB across both — down from ~52 MB).
+    private static let bytesPerImage = renderEdge * renderEdge * 4
 
     /// `NSCache` rather than a hand-rolled LRU dict so the system can evict
     /// flattened icons automatically under memory pressure (and the count/cost
-    /// limits bound steady-state footprint). Keyed by pid.
+    /// limits bound steady-state footprint). Keyed by pid for running apps.
     private static let cache: NSCache<NSNumber, NSImage> = {
         let c = NSCache<NSNumber, NSImage>()
         c.countLimit = capacity
         c.totalCostLimit = capacity * bytesPerImage
         return c
     }()
+    /// Sibling cache for launchable + recently-closed rows that have no pid.
+    /// Without this every search keystroke would re-fetch the disk icon for
+    /// each of the up-to-8 launcher rows + recently-closed rows: a steady
+    /// stream of `NSWorkspace.icon(forFile:)` calls on the main actor.
+    private static let bundleCache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.countLimit = capacity
+        c.totalCostLimit = capacity * bytesPerImage
+        return c
+    }()
 
     static func icon(for row: SwitcherRow) -> NSImage? {
-        // Launchable rows have no pid to key on — fetch their icon directly.
-        guard let pid = row.pid else { return row.icon }
-        let key = NSNumber(value: pid)
-        if let cached = cache.object(forKey: key) { return cached }
-        guard let source = row.app?.icon else { return row.icon }
+        if let pid = row.pid {
+            let key = NSNumber(value: pid)
+            if let cached = cache.object(forKey: key) { return cached }
+            guard let source = row.app?.icon else { return row.icon }
+            let flat = flattened(source) ?? source
+            cache.setObject(flat, forKey: key, cost: bytesPerImage)
+            return flat
+        }
+        // No pid → launchable or recently-closed. Key by bundle ID so a
+        // search session that lists the same apps on every keystroke reads
+        // from memory instead of round-tripping `NSWorkspace`.
+        guard let bundleID = row.bundleIdentifier, !bundleID.isEmpty else { return row.icon }
+        let key = bundleID as NSString
+        if let cached = bundleCache.object(forKey: key) { return cached }
+        guard let source = row.icon else { return nil }
         let flat = flattened(source) ?? source
-        cache.setObject(flat, forKey: key, cost: bytesPerImage)
+        bundleCache.setObject(flat, forKey: key, cost: bytesPerImage)
         return flat
     }
 
@@ -40,43 +65,18 @@ enum IconCache {
 
     static func clear() {
         cache.removeAllObjects()
+        bundleCache.removeAllObjects()
     }
 
-    /// Eagerly populate icons for the given pids so the first reveal pays no
-    /// `NSRunningApplication.icon` decode/flatten latency on the main thread.
-    /// Safe to call repeatedly; existing entries are kept, missing entries
-    /// fetched and flattened on a background queue.
+    /// Kept as a no-op for callers that used to eagerly populate the cache.
+    /// Eager prewarm was both an autolayout-thread hazard (Tahoe restyles
+    /// bundle icons via lazily-initialized AppKit views, which writes to the
+    /// layout engine when `NSImage.draw` runs off the main thread) and the
+    /// single biggest contributor to the post-launch RSS spike (~12 MB for a
+    /// 30-app system). On-demand flatten covers every icon a user actually
+    /// sees with negligible first-paint cost (≤1 ms per icon on M-series).
     static func prewarm(pids: [pid_t]) {
-        let apps = NSWorkspace.shared.runningApplications
-        let byPid = Dictionary(uniqueKeysWithValues: apps.map { ($0.processIdentifier, $0) })
-        // Collect the source icons still missing from the cache. Reading
-        // `app.icon` and touching `cache` must happen on the main actor; the
-        // expensive part (flattening) is deferred to a background queue below.
-        var pending: [(pid_t, NSImage)] = []
-        for pid in pids {
-            guard cache.object(forKey: NSNumber(value: pid)) == nil,
-                  let app = byPid[pid], let source = app.icon else { continue }
-            pending.append((pid, source))
-        }
-        guard !pending.isEmpty else { return }
-        // Flattening rasterizes a renderEdge² RGBA bitmap per icon — pure pixel work
-        // that has no business on the reveal-adjacent main thread when several
-        // apps launch at once. Do it on a background queue (each draws into its
-        // own bitmap rep, so there is no shared AppKit state) and hand the
-        // finished, immutable images back to the main-actor cache.
-        DispatchQueue.global(qos: .utility).async {
-            let flattenedPairs: [(pid_t, NSImage)] = pending.map { pid, source in
-                (pid, flattened(source) ?? source)
-            }
-            DispatchQueue.main.async {
-                for (pid, image) in flattenedPairs {
-                    let key = NSNumber(value: pid)
-                    if cache.object(forKey: key) == nil {
-                        cache.setObject(image, forKey: key, cost: bytesPerImage)
-                    }
-                }
-            }
-        }
+        _ = pids
     }
 
     /// Rasterize an app icon into a fixed-size, immutable bitmap.
@@ -90,7 +90,13 @@ enum IconCache {
     /// here and yields an image AppKit won't mutate afterwards, so the swap
     /// (and its flicker) can't happen. The styling cost is also paid once
     /// rather than on every redraw.
-    nonisolated private static func flattened(_ image: NSImage) -> NSImage? {
+    ///
+    /// `@MainActor` — bundle icons under Tahoe trigger AppKit view init
+    /// during `image.draw`, which touches the AutoLayout engine. Running
+    /// this off the main thread raised
+    /// `NSInternalInconsistencyException: Modifications to the layout
+    /// engine must not be performed from a background thread...`
+    private static func flattened(_ image: NSImage) -> NSImage? {
         let size = NSSize(width: renderEdge, height: renderEdge)
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,

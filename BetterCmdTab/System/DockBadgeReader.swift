@@ -56,6 +56,10 @@ final class DockBadgeReader {
 
     nonisolated private static let statusLabelAttribute = "AXStatusLabel"
 
+    nonisolated private static func bundleID(for url: URL) -> String? {
+        BundleIDURLCache.shared.lookup(url)
+    }
+
     nonisolated private static func readDockBadges() -> [String: String] {
         guard let dockPid = NSRunningApplication
             .runningApplications(withBundleIdentifier: "com.apple.dock")
@@ -86,9 +90,8 @@ final class DockBadgeReader {
             guard (values[0] as? String) == (kAXApplicationDockItemSubrole as String) else { continue }
             guard (values[1] as? Bool) == true else { continue }
             guard let badge = values[3] as? String, !badge.isEmpty else { continue }
-            guard let url = values[2] as? URL,
-                  let bundleID = Bundle(url: url)?.bundleIdentifier else { continue }
-            result[bundleID] = badge
+            guard let url = values[2] as? URL, let bid = bundleID(for: url) else { continue }
+            result[bid] = badge
         }
         return result
     }
@@ -114,5 +117,26 @@ final class DockBadgeReader {
         var value: AnyObject?
         guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
         return value as? String
+    }
+}
+
+/// Thread-safe URL → bundle ID cache, separated so the underlying `NSCache`
+/// (which is documented thread-safe but unmarked `Sendable`) can be captured
+/// by nonisolated code without a Swift 6 complaint. Used by the dock badge
+/// reader; trivially extendable to other scrapers that map a `file://` URL to
+/// a bundle ID.
+final class BundleIDURLCache: @unchecked Sendable {
+    static let shared = BundleIDURLCache()
+    private let cache: NSCache<NSURL, NSString> = {
+        let c = NSCache<NSURL, NSString>()
+        c.countLimit = 128
+        return c
+    }()
+    func lookup(_ url: URL) -> String? {
+        let nsURL = url as NSURL
+        if let hit = cache.object(forKey: nsURL) { return hit as String }
+        guard let bid = Bundle(url: url)?.bundleIdentifier else { return nil }
+        cache.setObject(bid as NSString, forKey: nsURL)
+        return bid
     }
 }

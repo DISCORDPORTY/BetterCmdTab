@@ -228,6 +228,7 @@ final class SwitcherItemView: NSView, SwitcherItemViewProtocol {
         // unchanged but other inputs (accent, metrics, label) still need it.
         // Hover action buttons apply to a real window of a running app.
         actionsAvailable = !isDialog && row.app != nil && row.window != nil
+        actionBar.setScale(metrics.scale)
         actionBar.applyEnabledButtons()
         updateHoverBar()
 
@@ -346,6 +347,10 @@ final class SwitcherItemView: NSView, SwitcherItemViewProtocol {
         let letterLineHeight = ceil(letterFont.ascender + abs(letterFont.descender))
         let letterY = (h - letterLineHeight) / 2
         letterLabel.frame = NSRect(x: letterX, y: letterY, width: m.letterColumnWidth, height: letterLineHeight)
+        // Letter hint and the hover action bar share the leftmost column —
+        // hide the letter the moment the bar appears so the dots don't sit
+        // on top of the type-to-jump character.
+        letterLabel.isHidden = !actionBar.isHidden
 
         let appX = letterX + m.letterColumnWidth + m.interGap
         appNameLabel.frame = NSRect(x: appX, y: labelY, width: m.appNameWidth, height: labelH)
@@ -393,10 +398,14 @@ final class SwitcherItemView: NSView, SwitcherItemViewProtocol {
         titleLabel.frame = NSRect(x: titleX, y: labelY, width: titleW, height: labelH)
 
         if !actionBar.isHidden {
-            // Right-aligned, vertically centered — floats over the status column.
+            // Left edge, vertically centered — floats over the letter / app
+            // name column. Browser tab titles (often long URL-ish text) live
+            // in the title column on the right and would otherwise vanish
+            // under the bar; this side has shorter, repeating content the
+            // user can tolerate briefly hiding during hover.
             let size = actionBar.contentSize
             actionBar.frame = NSRect(
-                x: bounds.width - m.horizontalInset - size.width,
+                x: m.horizontalInset,
                 y: round((h - size.height) / 2),
                 width: size.width,
                 height: size.height

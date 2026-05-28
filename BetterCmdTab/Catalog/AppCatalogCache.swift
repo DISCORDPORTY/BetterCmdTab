@@ -106,7 +106,8 @@ final class AppCatalogCache {
                         window: window.ref,
                         windowTitle: window.title,
                         isMinimized: window.isMinimized,
-                        isFullscreen: window.isFullscreen
+                        isFullscreen: window.isFullscreen,
+                        tabs: window.tabs
                     ))
                 }
             }

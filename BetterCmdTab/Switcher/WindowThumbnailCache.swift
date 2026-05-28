@@ -34,7 +34,16 @@ final class WindowThumbnailCache {
     private let refreshTTL: TimeInterval = 2.0
 
     private init() {
-        cache.countLimit = 64
+        // Preview mode rarely surfaces more than ~24 windows at once (one row
+        // per visible window of the front app); cap at 32 so the cache holds
+        // a generous working set without retaining stale captures from
+        // long-past reveals that would never be reused.
+        cache.countLimit = 32
+        // Cost-side ceiling so a 4K thumbnail can't single-handedly evict the
+        // rest of the cache by counting as 32MB on its own. Anchored to a
+        // typical Retina preview tile (~512×288 RGBA ≈ 590KB) × the count
+        // limit, with headroom for occasional wider previews.
+        cache.totalCostLimit = 32 * 600_000
     }
 
     /// Cached thumbnail for `wid`, or nil if not captured yet.

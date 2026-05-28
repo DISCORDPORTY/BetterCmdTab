@@ -184,6 +184,7 @@ final class SwitcherPreviewItemView: NSView, SwitcherItemViewProtocol {
 
         // Hover action buttons apply to a real window of a running app.
         actionsAvailable = !isDialog && row.app != nil && row.window != nil
+        actionBar.setScale(metrics.scale)
         actionBar.applyEnabledButtons()
         updateHoverBar()
 
@@ -302,10 +303,12 @@ final class SwitcherPreviewItemView: NSView, SwitcherItemViewProtocol {
         )
 
         if !actionBar.isHidden {
-            // Top-right corner of the thumbnail, inset slightly.
+            // Top-left corner of the thumbnail, inset slightly. Matches the
+            // macOS window-chrome convention (traffic lights live on the
+            // left side of every Mac window).
             let size = actionBar.contentSize
             actionBar.frame = NSRect(
-                x: round(thumbRect.maxX - size.width - 4),
+                x: round(thumbRect.minX + 4),
                 y: round(thumbRect.maxY - size.height - 4),
                 width: size.width,
                 height: size.height

@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import ApplicationServices
 import BetterShortcuts
 import Combine
 import os
@@ -28,7 +29,13 @@ final class SwitcherController: SwitcherViewDelegate {
     /// `baseRows`/`baseLabels` are the unfiltered source so the search query
     /// can widen again on backspace. Kept in sync by every refresh path.
     private var baseRows: [SwitcherRow] = [] {
-        didSet { baseFoldedValid = false }
+        didSet {
+            baseFoldedValid = false
+            // Window AXUIElements churn across reveals; drop the prefetch
+            // cache so we don't try to drill into a stale element.
+            tabPrefetchCache.removeAll()
+            tabPrefetchInFlight.removeAll()
+        }
     }
     private var baseLabels: [String] = []
     /// Diacritic-folded (app name, window title) per `baseRows` entry, rebuilt
@@ -56,6 +63,36 @@ final class SwitcherController: SwitcherViewDelegate {
     /// `.stayOpen` search mode: from then on, releasing ⌘ (or any other
     /// modifier) no longer commits — only Return or a mouse click does.
     private var stickyOpen: Bool = false
+    /// Browser tab drill-in state. While `tabDrillActive`, nav keys (Cmd+Tab,
+    /// Cmd+Left/Right, arrows) step `tabIndex` inside the highlighted row's
+    /// `tabs` array instead of changing the app selection. Reset on every row
+    /// change, dismiss, and `baseRows` swap.
+    private var tabDrillActive: Bool = false
+    private var tabIndex: Int = 0
+    private var tabTitles: [String] = []
+    /// Tab AX elements located by `WindowEnumerator.tabs(in:)` on drill-in.
+    /// Held here (not on `SwitcherRow`) because they're resolved lazily —
+    /// browsers nest the tab group too deep for the per-reveal AX scan to
+    /// touch them affordably. Empty for browser-family rows since those use
+    /// AppleScript-by-index activation.
+    private var liveTabElements: [AXUIElement] = []
+    /// Source of the current drill-in. `appleScript` → activate by index via
+    /// `BrowserTabs.activateTab`. `accessibility` → AX press on
+    /// `liveTabElements[tabIndex]`. Picked once per drill, never crossed.
+    private enum TabDrillBackend { case appleScript, accessibility }
+    private var tabDrillBackend: TabDrillBackend = .accessibility
+    /// Background prefetch of tab titles keyed by AXUIElement window
+    /// identity. Populated when selection lands on a tab-capable row so that
+    /// the eventual `\` finds the work already done. Cleared when the panel
+    /// dismisses or the base row set changes.
+    private struct TabPrefetch {
+        let titles: [String]
+        let liveTabs: [AXUIElement]
+        let backend: TabDrillBackend
+    }
+    private var tabPrefetchCache: [AXRef: TabPrefetch] = [:]
+    private var tabPrefetchInFlight: Set<AXRef> = []
+    private var tabPrefetchTimer: Timer?
     private var windowsOnlyMode: Bool = false
     private var windowsOnlyPid: pid_t? = nil
     private var windowsOnlyPrimedDelta: Int = 0
@@ -370,16 +407,33 @@ final class SwitcherController: SwitcherViewDelegate {
         }
     }
 
+    func switcherViewDidSelectTab(_ index: Int) {
+        guard tabDrillActive, tabTitles.indices.contains(index) else { return }
+        tabIndex = index
+        commitTab()
+    }
+
+    func switcherViewDidHoverTab(_ index: Int) {
+        guard tabDrillActive, tabTitles.indices.contains(index), index != tabIndex else { return }
+        tabIndex = index
+        view.setTabStripSelectedIndex(tabIndex)
+    }
+
     func switcherViewDidHover(index: Int) {
         guard phase == .visible else { return }
         guard rows.indices.contains(index), index != self.index else { return }
+        // Moving the selection off the drilled-in row drops drill mode — the
+        // strip belongs to the previous row's tabs.
+        if tabDrillActive { exitTabDrill() }
         self.index = index
         view.setSelectedIndex(index)
+        schedulePrefetchForCurrentSelection()
     }
 
     func switcherViewDidClick(index: Int) {
         guard phase == .visible else { return }
         guard rows.indices.contains(index) else { return }
+        if tabDrillActive { exitTabDrill() }
         self.index = index
         commit()
     }
@@ -407,6 +461,8 @@ final class SwitcherController: SwitcherViewDelegate {
             performOnVisibleTarget { Activator.hideApp($0) }
         case .quit:
             performQuitAction()
+        case .forceQuit:
+            performForceQuitAction()
         }
     }
 
@@ -456,6 +512,18 @@ final class SwitcherController: SwitcherViewDelegate {
             performOnVisibleTarget { Activator.hideApp($0) }
         case .quitApp:
             performQuitAction()
+        case .forceQuitApp:
+            performForceQuitAction()
+        case .enterTabDrill:
+            enterTabDrill()
+        case .exitTabDrill:
+            exitTabDrill()
+        case .tabPrev:
+            advanceTab(by: -1)
+        case .tabNext:
+            advanceTab(by: 1)
+        case .commitTab:
+            commitTab()
         case .letterInput(let ch):
             handleLetter(ch)
         }
@@ -603,6 +671,7 @@ final class SwitcherController: SwitcherViewDelegate {
             index = max(0, min(rows.count - 1, index + delta))
         }
         view.setSelectedIndex(index)
+        schedulePrefetchForCurrentSelection()
     }
 
     private func advanceColumn(by delta: Int) {
@@ -906,6 +975,12 @@ final class SwitcherController: SwitcherViewDelegate {
     }
 
     private func commit() {
+        // Drilled-in commits go through the tab activation path instead of
+        // activating the parent window.
+        if tabDrillActive {
+            commitTab()
+            return
+        }
         revealTimer?.invalidate()
         revealTimer = nil
         let currentPhase = phase
@@ -961,6 +1036,7 @@ final class SwitcherController: SwitcherViewDelegate {
         closedTombstones.removeAll()
         resetLetterBuffer()
         resetSearch()
+        view.releaseIdleResources()
         if pendingActivation != nil { CommitFeedback.play() }
         pendingActivation?()
     }
@@ -980,8 +1056,18 @@ final class SwitcherController: SwitcherViewDelegate {
         windowsOnlyPid = nil
         windowsOnlyPrimedDelta = 0
         closedTombstones.removeAll()
+        tabDrillActive = false
+        tabTitles = []
+        liveTabElements = []
+        tabIndex = 0
+        hotkey.setTabDrillActive(false)
+        tabPrefetchCache.removeAll()
+        tabPrefetchInFlight.removeAll()
+        tabPrefetchTimer?.invalidate()
+        tabPrefetchTimer = nil
         resetLetterBuffer()
         resetSearch()
+        view.releaseIdleResources()
     }
 
     private func performOnVisibleTarget(_ action: (SwitcherRow) -> Void) {
@@ -1019,6 +1105,207 @@ final class SwitcherController: SwitcherViewDelegate {
                 )
             }
             Activator.quitApp(row)
+        }
+    }
+
+    // MARK: - Browser tab drill-in
+
+    /// Drill into the highlighted row's tab group. Two backends:
+    /// - **AppleScript** for known browser families (Safari, Chrome, Arc,
+    ///   Brave, Edge, Vivaldi, Opera, Dia). AX scraping is unreliable across
+    ///   browser versions — the scripting dictionaries are stable.
+    /// - **Accessibility** as a fallback for AppKit-native tabbed apps
+    ///   (Finder, Terminal, iTerm) by recursive AX walk for the first tab
+    ///   group.
+    /// Both run off-main; the strip appears once titles land. Silently
+    /// no-ops if no tabs are found.
+    private func enterTabDrill() {
+        guard Preferences.shared.experimentalTabDrillIn else { return }
+        guard phase == .visible, rows.indices.contains(index) else { return }
+        let row = rows[index]
+        guard let window = row.window, let app = row.app else { return }
+        // Cache hit: drill-in is instant — strip appears on the same run
+        // loop tick.
+        if let cached = tabPrefetchCache[AXRef(element: window)], !cached.titles.isEmpty {
+            applyDrill(titles: cached.titles, liveTabs: cached.liveTabs, backend: cached.backend, window: window)
+            return
+        }
+        let isBrowser = (BrowserTabs.Family.from(bundleID: app.bundleIdentifier) != nil)
+        // Reuse tab AXUIElements already discovered by the cache snapshot when
+        // available — saves a recursive AX walk on every non-browser drill-in
+        // (Finder/Terminal/etc.). Browsers ignore this and run AppleScript.
+        let prefetchedTabs = isBrowser ? [] : row.tabs
+        let gen = revealGeneration
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            let result = Self.fetchTabsBlocking(app: app, window: window, isBrowser: isBrowser, prefetchedTabs: prefetchedTabs)
+            guard let result else { return }
+            DispatchQueue.main.async {
+                guard let self, gen == self.revealGeneration, self.phase == .visible else { return }
+                guard self.rows.indices.contains(self.index),
+                      let currentWindow = self.rows[self.index].window,
+                      CFEqual(currentWindow, window) else { return }
+                self.applyDrill(titles: result.titles, liveTabs: result.liveTabs, backend: result.backend, window: window)
+            }
+        }
+    }
+
+    /// Apply a fetched/cached tab set to the panel — single sink used by
+    /// both the cache-hit and async paths so they can't drift.
+    private func applyDrill(titles: [String], liveTabs: [AXUIElement], backend: TabDrillBackend, window: AXUIElement) {
+        tabTitles = titles
+        liveTabElements = liveTabs
+        tabDrillBackend = backend
+        tabIndex = 0
+        tabDrillActive = true
+        stickyOpen = true
+        hotkey.setTabDrillActive(true)
+        refreshDisplay()
+        tabPrefetchCache[AXRef(element: window)] = TabPrefetch(titles: titles, liveTabs: liveTabs, backend: backend)
+    }
+
+    /// Blocking tab fetch suitable for a background queue. Returns nil for a
+    /// row that has no tab group worth a strip (so the caller can silently
+    /// skip without forcing the panel into drill mode on an empty result).
+    /// `prefetchedTabs` lets the caller short-circuit the recursive AX walk
+    /// when the cache already discovered the tab group during its snapshot.
+    nonisolated private static func fetchTabsBlocking(app: NSRunningApplication, window: AXUIElement, isBrowser: Bool, prefetchedTabs: [AXUIElement] = []) -> (titles: [String], liveTabs: [AXUIElement], backend: TabDrillBackend)? {
+        if isBrowser, let scripted = BrowserTabs.tabTitles(for: app, window: window), !scripted.isEmpty {
+            return (scripted, [], .appleScript)
+        }
+        if !isBrowser {
+            let axTabs: [AXUIElement]
+            if prefetchedTabs.count > 1 {
+                axTabs = prefetchedTabs
+            } else {
+                axTabs = WindowEnumerator.tabs(in: window)
+            }
+            guard axTabs.count > 1 else { return nil }
+            let titles = WindowEnumerator.tabTitles(for: axTabs)
+            return (titles, axTabs, .accessibility)
+        }
+        return nil
+    }
+
+    /// Kick a background prefetch for the highlighted row after a short
+    /// settle so rapid Tab presses don't spam the AppleScript / AX scan. By
+    /// the time the user reaches for `\`, the result is usually already in
+    /// `tabPrefetchCache`.
+    private func schedulePrefetchForCurrentSelection() {
+        tabPrefetchTimer?.invalidate()
+        guard Preferences.shared.experimentalTabDrillIn,
+              phase == .visible, rows.indices.contains(index),
+              let window = rows[index].window,
+              let app = rows[index].app else { return }
+        let key = AXRef(element: window)
+        if tabPrefetchCache[key] != nil || tabPrefetchInFlight.contains(key) { return }
+        let isBrowser = (BrowserTabs.Family.from(bundleID: app.bundleIdentifier) != nil)
+        let prefetchedTabs = isBrowser ? [] : rows[index].tabs
+        let timer = Timer(timeInterval: 0.18, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.tabPrefetchCache[key] == nil,
+                      !self.tabPrefetchInFlight.contains(key) else { return }
+                self.tabPrefetchInFlight.insert(key)
+                let gen = self.revealGeneration
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    let result = Self.fetchTabsBlocking(app: app, window: window, isBrowser: isBrowser, prefetchedTabs: prefetchedTabs)
+                    DispatchQueue.main.async {
+                        guard let self, gen == self.revealGeneration else { return }
+                        self.tabPrefetchInFlight.remove(key)
+                        guard let result, !result.titles.isEmpty else { return }
+                        self.tabPrefetchCache[key] = TabPrefetch(titles: result.titles, liveTabs: result.liveTabs, backend: result.backend)
+                    }
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        tabPrefetchTimer = timer
+    }
+
+    private func exitTabDrill() {
+        guard tabDrillActive else { return }
+        tabDrillActive = false
+        tabTitles = []
+        liveTabElements = []
+        tabIndex = 0
+        hotkey.setTabDrillActive(false)
+        refreshDisplay()
+    }
+
+    private func advanceTab(by delta: Int) {
+        guard tabDrillActive, !tabTitles.isEmpty else { return }
+        let count = tabTitles.count
+        tabIndex = ((tabIndex + delta) % count + count) % count
+        view.setTabStripSelectedIndex(tabIndex)
+    }
+
+    private func commitTab() {
+        guard tabDrillActive, !tabTitles.isEmpty,
+              rows.indices.contains(index),
+              let app = rows[index].app,
+              let window = rows[index].window else {
+            exitTabDrill()
+            commit()
+            return
+        }
+        let row = rows[index]
+        let chosen = tabIndex
+        let backend = tabDrillBackend
+        let axTab: AXUIElement? = (backend == .accessibility && liveTabElements.indices.contains(chosen))
+            ? liveTabElements[chosen] : nil
+        if backend == .accessibility && axTab == nil {
+            exitTabDrill()
+            commit()
+            return
+        }
+        let instantSpace = Preferences.shared.experimentalInstantSpaceSwitch
+        if let pid = row.pid { mru.bump(pid) }
+        bumpWindowMRUIfPossible(for: row)
+
+        revealGeneration &+= 1
+        phase = .idle
+        cache.setPanelVisible(false)
+        panel.dismiss()
+        tabDrillActive = false
+        tabTitles = []
+        liveTabElements = []
+        tabIndex = 0
+        hotkey.setTabDrillActive(false)
+        primedApps = []
+        rows = []
+        baseRows = []
+        baseLabels = []
+        closedTombstones.removeAll()
+        resetLetterBuffer()
+        resetSearch()
+        view.releaseIdleResources()
+        CommitFeedback.play()
+        switch backend {
+        case .appleScript:
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = BrowserTabs.activateTab(at: chosen, in: app, window: window)
+            }
+        case .accessibility:
+            if let tab = axTab {
+                Activator.activateTab(in: app, window: window, tab: tab, instantSpace: instantSpace)
+            }
+        }
+    }
+
+    /// SIGKILL the highlighted app — bypasses the AppleEvent terminate() that
+    /// hung apps ignore. Recorded in `RecentlyClosedStore` like a normal quit so
+    /// the app can be relaunched from there.
+    private func performForceQuitAction() {
+        performOnVisibleTarget { row in
+            if row.app?.activationPolicy == .regular, let bundleID = row.bundleIdentifier {
+                RecentlyClosedStore.shared.record(
+                    bundleID: bundleID,
+                    appName: row.appName,
+                    title: "",
+                    documentPath: nil
+                )
+            }
+            Activator.forceQuitApp(row)
         }
     }
 
@@ -1144,9 +1431,9 @@ final class SwitcherController: SwitcherViewDelegate {
     /// dismissed in the meantime.
     private func scheduleVisibleRefresh(after delay: TimeInterval = 0) {
         let gen = revealGeneration
-        let apply = { [weak self] in
-            guard let self, gen == self.revealGeneration, self.phase == .visible else { return }
-            self.cache.scheduleFullRefresh { [weak self] in
+        @MainActor func apply() {
+            guard gen == revealGeneration, phase == .visible else { return }
+            cache.scheduleFullRefresh { [weak self] in
                 guard let self, gen == self.revealGeneration, self.phase == .visible else { return }
                 let fresh = self.filterClosedTombstones(self.cache.rows(orderedBy: self.mru.order))
                 if fresh.isEmpty {
@@ -1165,7 +1452,9 @@ final class SwitcherController: SwitcherViewDelegate {
             }
         }
         if delay > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: apply)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                Task { @MainActor in apply() }
+            }
         } else {
             apply()
         }
@@ -1413,7 +1702,9 @@ final class SwitcherController: SwitcherViewDelegate {
             metrics: currentMetrics,
             highlightPrefix: searchActive ? "" : letterBuffer,
             searchActive: searchActive,
-            searchQuery: searchQuery
+            searchQuery: searchQuery,
+            tabStripTitles: tabDrillActive ? tabTitles : nil,
+            tabStripSelectedIndex: tabIndex
         )
         panel.present()
     }
@@ -1476,6 +1767,14 @@ final class SwitcherController: SwitcherViewDelegate {
     /// detaches the switcher so it persists until Return / mouse selection;
     /// once detached, further modifier releases are ignored.
     private func handleModifierRelease() {
+        // Drill-in commits on release: the user picks the highlighted tab the
+        // same way releasing ⌘ commits the highlighted app. Bypass the
+        // stickyOpen guard that enterTabDrill set for safety against stray
+        // commits during the drill.
+        if tabDrillActive {
+            commitTab()
+            return
+        }
         if stickyOpen { return }
         if searchActive, Preferences.shared.searchDismissMode == .stayOpen {
             stickyOpen = true

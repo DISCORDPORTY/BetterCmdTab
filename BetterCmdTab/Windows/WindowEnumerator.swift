@@ -7,21 +7,32 @@ struct WindowInfo {
     let title: String
     let isMinimized: Bool
     let isFullscreen: Bool
+    /// `AXTabs` children of this window (browsers, tabbed Finder, iTerm, …).
+    /// Empty when the window has no tab group or only a single tab — drill-in
+    /// is only meaningful with at least two tabs.
+    let tabs: [AXUIElement]
 
     init(
         ref: AXUIElement,
         title: String,
         isMinimized: Bool,
-        isFullscreen: Bool = false
+        isFullscreen: Bool = false,
+        tabs: [AXUIElement] = []
     ) {
         self.ref = ref
         self.title = title
         self.isMinimized = isMinimized
         self.isFullscreen = isFullscreen
+        self.tabs = tabs
     }
 }
 
-private struct AXRef: Hashable {
+/// Hashable wrapper around `AXUIElement` whose equality follows the CF identity
+/// contract (`CFEqual`), not raw pointer or `CFHash` integer comparison. Use
+/// this as a dictionary key when the value semantically belongs to a specific
+/// AX element — CFHash alone is non-unique across distinct elements and would
+/// silently collide.
+struct AXRef: Hashable {
     let element: AXUIElement
     static func == (lhs: AXRef, rhs: AXRef) -> Bool { CFEqual(lhs.element, rhs.element) }
     func hash(into hasher: inout Hasher) { hasher.combine(CFHash(element)) }
@@ -213,36 +224,78 @@ enum WindowEnumerator {
             kAXMinimizedAttribute,
             "AXFullScreen" as CFString,
             kAXTitleAttribute,
+            kAXPositionAttribute,
+            kAXSizeAttribute,
         ] as CFArray
         var seenTabGroups: Set<[AXRef]> = []
+        var addedTabGroupForPid = false
+        // Native macOS window tabs (Finder, Terminal, TextEdit, Ghostty, ...)
+        // expose each tab as its own AXWindow with its own CGWindowID — but
+        // they share the same on-screen frame because only one tab renders
+        // at a time and macOS keeps the merged-window outline identical
+        // across tabs. Dedup by (origin × size) keeps one row per visual
+        // merged window. Edge case: two separate tabbed windows of the same
+        // app happening to occupy exactly the same frame would collapse,
+        // but that requires the user to overlap two windows pixel-perfect.
+        var seenFrames: Set<String> = []
         for window in elements {
             AXUIElementSetMessagingTimeout(window, Self.confirmedTimeout)
             var valuesRef: CFArray?
             guard AXUIElementCopyMultipleAttributeValues(window, attrNames, AXCopyMultipleAttributeOptions(rawValue: 0), &valuesRef) == .success,
-                  let values = valuesRef as? [AnyObject], values.count == 5 else { continue }
+                  let values = valuesRef as? [AnyObject], values.count == 7 else { continue }
 
             let subrole = (values[0] as? String) ?? ""
             guard acceptedSubroles.contains(subrole) else { continue }
 
+            var windowTabs: [AXUIElement] = []
             if let tabs = values[1] as? [AXUIElement], tabs.count > 1 {
+                if addedTabGroupForPid { continue }
                 let key = tabs.map { AXRef(element: $0) }
                 if seenTabGroups.contains(key) { continue }
                 seenTabGroups.insert(key)
+                windowTabs = tabs
+                addedTabGroupForPid = true
             }
 
             let minimized = (values[2] as? Bool) ?? false
             let fullscreen = (values[3] as? Bool) ?? false
             let windowTitle = (values[4] as? String) ?? ""
 
+            // Native-tab dedup by frame. Minimized windows legitimately
+            // share (0, 0) sometimes — skip the frame check for them.
+            if !minimized,
+               let frameKey = frameKeyFromAttributes(values[5], values[6]) {
+                if seenFrames.contains(frameKey) { continue }
+                seenFrames.insert(frameKey)
+            }
+
             infos.append(WindowInfo(
                 ref: window,
                 title: windowTitle,
                 isMinimized: minimized,
-                isFullscreen: fullscreen
+                isFullscreen: fullscreen,
+                tabs: windowTabs
             ))
         }
 
         return sortedByZOrder(infos, cgZOrder: cgZOrder)
+    }
+
+    /// Stringify a window's (position, size) for dedup. Returns nil when
+    /// either attribute is missing or fails to decode — defaults to "keep
+    /// the window" rather than collapsing on incomplete data.
+    private static func frameKeyFromAttributes(_ posValue: AnyObject, _ sizeValue: AnyObject) -> String? {
+        guard CFGetTypeID(posValue) == AXValueGetTypeID(),
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posValue as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) else { return nil }
+        // Round to whole pixels — tab-sibling NSWindows occasionally differ
+        // by a sub-pixel due to autosize; the visual outline is identical.
+        let x = Int(origin.x.rounded()), y = Int(origin.y.rounded())
+        let w = Int(size.width.rounded()), h = Int(size.height.rounded())
+        return "\(x),\(y),\(w),\(h)"
     }
 
     /// Re-orders the AX-derived window list to match the WindowServer
@@ -266,5 +319,62 @@ enum WindowEnumerator {
             if lhs.rank != rhs.rank { return lhs.rank < rhs.rank }
             return lhs.fallback < rhs.fallback
         }.map { $0.info }
+    }
+
+    /// Fetch titles for a tab group's `AXTab` children. Each tab is a separate
+    /// AX element so the call is N IPCs — keep off the reveal path and only
+    /// invoke when the user actually drills in.
+    static func tabTitles(for tabs: [AXUIElement]) -> [String] {
+        var titles: [String] = []
+        titles.reserveCapacity(tabs.count)
+        for tab in tabs {
+            AXUIElementSetMessagingTimeout(tab, Self.confirmedTimeout)
+            var titleValue: AnyObject?
+            AXUIElementCopyAttributeValue(tab, kAXTitleAttribute as CFString, &titleValue)
+            titles.append((titleValue as? String) ?? "")
+        }
+        return titles
+    }
+
+    /// Recursively locate a window's tab buttons. Apps that use AppKit's native
+    /// window-tab feature (Finder, Terminal, some older browsers) expose
+    /// `AXTabs` directly on the window, but Safari/Chrome/Arc/Edge nest their
+    /// tab strip several levels deep inside an `AXTabGroup`. DFS through the
+    /// AX tree with a depth cap so a deep but tab-less hierarchy doesn't burn
+    /// time, and return the first non-empty `AXTabs` we find.
+    static func tabs(in window: AXUIElement) -> [AXUIElement] {
+        if let direct = tabsAttribute(of: window), direct.count > 1 {
+            return direct
+        }
+        return findTabsRecursive(in: window, depth: 0)
+    }
+
+    private static let tabSearchMaxDepth = 6
+
+    private static func tabsAttribute(of element: AXUIElement) -> [AXUIElement]? {
+        var value: AnyObject?
+        AXUIElementSetMessagingTimeout(element, Self.confirmedTimeout)
+        guard AXUIElementCopyAttributeValue(element, kAXTabsAttribute as CFString, &value) == .success,
+              let arr = value as? [AXUIElement], !arr.isEmpty else {
+            return nil
+        }
+        return arr
+    }
+
+    private static func findTabsRecursive(in element: AXUIElement, depth: Int) -> [AXUIElement] {
+        guard depth < tabSearchMaxDepth else { return [] }
+        var childrenValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue) == .success,
+              let children = childrenValue as? [AXUIElement] else {
+            return []
+        }
+        for child in children {
+            if let tabs = tabsAttribute(of: child), tabs.count > 1 {
+                return tabs
+            }
+            let nested = findTabsRecursive(in: child, depth: depth + 1)
+            if !nested.isEmpty { return nested }
+        }
+        return []
     }
 }

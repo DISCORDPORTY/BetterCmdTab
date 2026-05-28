@@ -80,20 +80,27 @@ final class InstalledAppsIndex {
         var result: [InstalledApp] = []
         var seenBundleIDs = Set<String>()
 
+        // `Bundle(url:)` parses Info.plist into in-memory CFDictionaries and
+        // caches them on the Bundle instance. Without an autoreleasepool the
+        // ~150 transient bundles created during a scan stay resident until
+        // the enclosing runloop drains — a >5MB hump while the index builds.
+        // Drain per-directory so memory is reclaimed as we go.
         for dir in searchDirectories {
-            guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { continue }
-            for entry in entries where entry.hasSuffix(".app") {
-                let url = URL(fileURLWithPath: dir).appendingPathComponent(entry)
-                guard let bundle = Bundle(url: url),
-                      let bundleID = bundle.bundleIdentifier,
-                      !seenBundleIDs.contains(bundleID) else { continue }
-                seenBundleIDs.insert(bundleID)
-                // `displayName(atPath:)` respects localization, but returns a
-                // trailing ".app" when the user enabled "show all filename
-                // extensions" in Finder — strip it so the switcher never shows it.
-                var name = fm.displayName(atPath: url.path)
-                if name.hasSuffix(".app") { name.removeLast(4) }
-                result.append(InstalledApp(name: name, bundleID: bundleID, url: url))
+            autoreleasepool {
+                guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return }
+                for entry in entries where entry.hasSuffix(".app") {
+                    let url = URL(fileURLWithPath: dir).appendingPathComponent(entry)
+                    guard let bundle = Bundle(url: url),
+                          let bundleID = bundle.bundleIdentifier,
+                          !seenBundleIDs.contains(bundleID) else { continue }
+                    seenBundleIDs.insert(bundleID)
+                    // `displayName(atPath:)` respects localization, but returns a
+                    // trailing ".app" when the user enabled "show all filename
+                    // extensions" in Finder — strip it so the switcher never shows it.
+                    var name = fm.displayName(atPath: url.path)
+                    if name.hasSuffix(".app") { name.removeLast(4) }
+                    result.append(InstalledApp(name: name, bundleID: bundleID, url: url))
+                }
             }
         }
         return result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
