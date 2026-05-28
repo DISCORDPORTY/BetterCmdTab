@@ -13,9 +13,16 @@ import AppKit
 /// `setHotAction(_:)` here.
 @MainActor
 final class HoverActionBar: NSView {
-    /// Diameter of each circular dot, and the gap between them.
-    static let dotSize: CGFloat = 14
-    private static let spacing: CGFloat = 5
+    /// Base dot diameter at scale 1.0; the live diameter scales with the
+    /// switcher's current size so the buttons read at the same relative
+    /// weight on every panel size.
+    static let baseDotSize: CGFloat = 14
+    private static let baseSpacing: CGFloat = 5
+
+    /// Live scale factor; set by the host item view from `metrics.scale`.
+    private var scaleFactor: CGFloat = 1.0
+    var dotSize: CGFloat { round(Self.baseDotSize * scaleFactor) }
+    private var spacing: CGFloat { round(Self.baseSpacing * scaleFactor) }
 
     private var dotsByAction: [RowAction: TrafficLightDot] = [:]
     private var orderedDots: [TrafficLightDot] = []
@@ -38,6 +45,7 @@ final class HoverActionBar: NSView {
         Spec(action: .maximize, symbol: "plus", color: .systemGreen, tooltip: "Zoom window"),
         Spec(action: .hide, symbol: "eye.slash.fill", color: .systemGray, tooltip: "Hide app"),
         Spec(action: .quit, symbol: "power", color: .systemGray, tooltip: "Quit app"),
+        Spec(action: .forceQuit, symbol: "xmark.octagon.fill", color: .systemRed, tooltip: "Force quit app"),
     ]
 
     override init(frame frameRect: NSRect) {
@@ -61,10 +69,12 @@ final class HoverActionBar: NSView {
     /// `applyEnabledButtons()` so frames are correct even when the bar's size
     /// doesn't change between reveals.
     private func layoutDots() {
+        let d = dotSize
+        let s = spacing
         var x: CGFloat = 0
         for dot in orderedDots where !dot.isHidden {
-            dot.frame = NSRect(x: x, y: 0, width: Self.dotSize, height: Self.dotSize)
-            x += Self.dotSize + Self.spacing
+            dot.frame = NSRect(x: x, y: 0, width: d, height: d)
+            x += d + s
         }
     }
 
@@ -73,8 +83,37 @@ final class HoverActionBar: NSView {
     var contentSize: NSSize {
         let visible = orderedDots.filter { !$0.isHidden }.count
         guard visible > 0 else { return .zero }
-        let width = CGFloat(visible) * Self.dotSize + CGFloat(visible - 1) * Self.spacing
-        return NSSize(width: width, height: Self.dotSize)
+        let d = dotSize
+        let width = CGFloat(visible) * d + CGFloat(visible - 1) * spacing
+        return NSSize(width: width, height: d)
+    }
+
+    /// Apply the current switcher scale to the bar so its dots match the
+    /// active panel size. Triggers a relayout of the visible dots.
+    func setScale(_ value: CGFloat) {
+        guard value != scaleFactor else { return }
+        scaleFactor = value
+        layoutDots()
+        invalidateIntrinsicContentSize()
+    }
+
+    /// Shrink the dots so the bar fits within `maxWidth`. Used by the grid
+    /// tile, whose tile width is fixed and would otherwise be overrun by the
+    /// full-size dots when every button is enabled (six dots × 14pt + spacing
+    /// quickly exceeds a small grid tile, pushing the outer two past the
+    /// hit-test bounds and making them unclickable).
+    func fitWidth(_ maxWidth: CGFloat) {
+        guard maxWidth > 0 else { return }
+        let visible = orderedDots.filter { !$0.isHidden }.count
+        guard visible > 0 else { return }
+        let needed = contentSize.width
+        if needed <= maxWidth { return }
+        let downscale = maxWidth / needed
+        let newScale = scaleFactor * downscale
+        guard abs(newScale - scaleFactor) > 0.001 else { return }
+        scaleFactor = newScale
+        layoutDots()
+        invalidateIntrinsicContentSize()
     }
 
     /// Show/hide each dot per the user's per-action preferences.
@@ -85,6 +124,7 @@ final class HoverActionBar: NSView {
         dotsByAction[.maximize]?.isHidden = !prefs.hoverShowMaximize
         dotsByAction[.hide]?.isHidden = !prefs.hoverShowHide
         dotsByAction[.quit]?.isHidden = !prefs.hoverShowQuit
+        dotsByAction[.forceQuit]?.isHidden = !prefs.hoverShowForceQuit
         layoutDots()
     }
 
@@ -92,7 +132,7 @@ final class HoverActionBar: NSView {
     var hasAnyEnabledButton: Bool {
         let prefs = Preferences.shared
         return prefs.hoverShowClose || prefs.hoverShowMinimize || prefs.hoverShowMaximize
-            || prefs.hoverShowHide || prefs.hoverShowQuit
+            || prefs.hoverShowHide || prefs.hoverShowQuit || prefs.hoverShowForceQuit
     }
 
     /// The action whose dot contains `windowPoint` (in window coordinates), or
@@ -113,32 +153,62 @@ final class HoverActionBar: NSView {
     }
 }
 
-/// A single circular traffic-light dot. Custom-drawn so it's always a perfect
-/// circle. Mouse handling is driven externally by `SwitcherView` (see the type
-/// doc on `HoverActionBar`), so this view only draws — including a brighter
-/// "hot" state when the pointer is over it.
+/// A single circular traffic-light dot. The circle is custom-drawn; the
+/// glyph rides as a centered `NSImageView` so AppKit aligns the symbol's
+/// actual cap-height optical center to the dot center (manually computing
+/// `bounds.midX - gs.width/2` lands the bbox center, not the visual center
+/// — SF Symbols ship with asymmetric ascender/descender padding that
+/// shifted every glyph half a pixel off-center). Re-rendering the symbol on
+/// each resize keeps it sharp at every switcher scale.
 @MainActor
 final class TrafficLightDot: NSView {
     let action: RowAction
 
     private let fillColor: NSColor
-    private let glyph: NSImage?
+    private let symbolName: String
+    private let glyphView = NSImageView()
     var isHot = false { didSet { if oldValue != isHot { needsDisplay = true } } }
 
     init(action: RowAction, color: NSColor, symbol: String, tooltip: String) {
         self.action = action
         self.fillColor = color
-        let cfg = NSImage.SymbolConfiguration(pointSize: 8, weight: .bold)
-            .applying(.init(paletteColors: [NSColor.black.withAlphaComponent(0.65)]))
-        self.glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?.withSymbolConfiguration(cfg)
-        super.init(frame: NSRect(x: 0, y: 0, width: HoverActionBar.dotSize, height: HoverActionBar.dotSize))
+        self.symbolName = symbol
+        super.init(frame: NSRect(x: 0, y: 0, width: HoverActionBar.baseDotSize, height: HoverActionBar.baseDotSize))
         toolTip = tooltip
+
+        glyphView.translatesAutoresizingMaskIntoConstraints = false
+        glyphView.imageScaling = .scaleProportionallyDown
+        glyphView.imageAlignment = .alignCenter
+        addSubview(glyphView)
+        NSLayoutConstraint.activate([
+            glyphView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            glyphView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            glyphView.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.62),
+            glyphView.heightAnchor.constraint(equalTo: heightAnchor, multiplier: 0.62),
+        ])
+        rebuildGlyph(for: bounds.height)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: HoverActionBar.dotSize, height: HoverActionBar.dotSize)
+        NSSize(width: HoverActionBar.baseDotSize, height: HoverActionBar.baseDotSize)
+    }
+
+    override func layout() {
+        super.layout()
+        rebuildGlyph(for: bounds.height)
+    }
+
+    /// SF Symbol's point size is what determines stroke weight — set it from
+    /// the live dot height so the glyph keeps its proportional weight at
+    /// every panel scale, instead of staying glued to the base 8pt size.
+    private func rebuildGlyph(for dotHeight: CGFloat) {
+        let pointSize = max(6, round(dotHeight * 0.55))
+        let cfg = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .bold)
+            .applying(.init(paletteColors: [NSColor.black.withAlphaComponent(0.65)]))
+        glyphView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(cfg)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -152,18 +222,5 @@ final class TrafficLightDot: NSView {
         NSColor.black.withAlphaComponent(isHot ? 0.28 : 0.18).setStroke()
         path.lineWidth = isHot ? 0.75 : 0.5
         path.stroke()
-
-        // The glyph is always shown (the bar only appears on row hover anyway);
-        // the hot state just brightens the dot beneath it.
-        if let glyph {
-            let gs = glyph.size
-            let gr = NSRect(
-                x: bounds.midX - gs.width / 2,
-                y: bounds.midY - gs.height / 2,
-                width: gs.width,
-                height: gs.height
-            )
-            glyph.draw(in: gr)
-        }
     }
 }

@@ -227,6 +227,7 @@ final class SwitcherIconItemView: NSView, SwitcherItemViewProtocol {
 
         // Hover action buttons apply to a real window of a running app.
         actionsAvailable = !isDialog && row.app != nil && row.window != nil
+        actionBar.setScale(metrics.scale)
         actionBar.applyEnabledButtons()
         updateHoverBar()
 
@@ -412,6 +413,9 @@ final class SwitcherIconItemView: NSView, SwitcherItemViewProtocol {
             width: lw,
             height: lh
         )
+        // Hide the letter hint while the hover bar is showing — they share
+        // the top strip and otherwise overlap.
+        letterLabel.isHidden = !actionBar.isHidden
 
         // Dock badge: hug the icon's top-right corner with a hair of outward
         // float, like a native badge. The icon is inset within the tile so this
@@ -442,11 +446,15 @@ final class SwitcherIconItemView: NSView, SwitcherItemViewProtocol {
         titleLabel.frame = NSRect(x: 0, y: labelAreaH - nameH - titleH, width: w, height: titleH)
 
         if !actionBar.isHidden {
-            // Centered horizontally just below the icon's top edge.
+            // Constrain the bar to the tile width minus a small inset before
+            // measuring — with every button enabled, the natural six-dot run
+            // is wider than narrow grid tiles, which pushed the outer dots
+            // past the hit-test bounds and made them unclickable.
+            actionBar.fitWidth(tile - 8)
             let size = actionBar.contentSize
             actionBar.frame = NSRect(
-                x: round(iconArea.midX - size.width / 2),
-                y: round(iconArea.maxY - size.height - 2),
+                x: round((w - size.width) / 2),
+                y: round(bounds.height - letterArea / 2 - size.height / 2),
                 width: size.width,
                 height: size.height
             )

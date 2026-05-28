@@ -9,6 +9,7 @@ enum RowAction: Int {
     case maximize
     case hide
     case quit
+    case forceQuit
 }
 
 @MainActor
@@ -16,21 +17,36 @@ protocol SwitcherViewDelegate: AnyObject {
     func switcherViewDidHover(index: Int)
     func switcherViewDidClick(index: Int)
     func switcherViewDidInvokeAction(_ action: RowAction, atIndex index: Int)
+    func switcherViewDidSelectTab(_ index: Int)
+    func switcherViewDidHoverTab(_ index: Int)
 }
 
 @MainActor
-final class SwitcherView: NSView {
+final class SwitcherView: NSView, TabStripDelegate {
+    func tabStrip(_ strip: TabStripView, didSelectIndex index: Int) {
+        delegate?.switcherViewDidSelectTab(index)
+    }
+
+    func tabStrip(_ strip: TabStripView, didHoverIndex index: Int) {
+        delegate?.switcherViewDidHoverTab(index)
+    }
+
     weak var delegate: SwitcherViewDelegate?
 
     private let glassBackdrop: NSView
     private let contentContainer = NSView()
     private let listContainer = NSView()
     private let searchBar = SwitcherSearchBarView()
+    private let tabStrip = TabStripView()
     private let noResultsLabel = NSTextField(labelWithString: "No matches")
     private var itemViews: [SwitcherItemViewProtocol] = []
     private var rows: [SwitcherRow] = []
     private(set) var labels: [String] = []
     private var selectedIndex: Int = 0
+    /// Last `selectedIndex` value handed to the item views, so `applySelection`
+    /// can toggle just the two affected tiles on arrow-spam instead of looping
+    /// every item view every keystroke.
+    private var appliedSelectedIndex: Int = -1
     /// Row the mouse is directly over (-1 = none). Separate from `selectedIndex`
     /// so hover action buttons appear only under the pointer, not on a
     /// keyboard-selected row.
@@ -74,6 +90,9 @@ final class SwitcherView: NSView {
         contentContainer.addSubview(listContainer)
         searchBar.isHidden = true
         contentContainer.addSubview(searchBar)
+        tabStrip.isHidden = true
+        tabStrip.delegate = self
+        contentContainer.addSubview(tabStrip)
         noResultsLabel.isHidden = true
         noResultsLabel.alignment = .center
         noResultsLabel.textColor = .secondaryLabelColor
@@ -86,8 +105,9 @@ final class SwitcherView: NSView {
     private var highlightPrefix: String = ""
     private var searchActive: Bool = false
     private var accent: NSColor = .controlAccentColor
+    private var tabStripActive: Bool = false
 
-    func configure(rows: [SwitcherRow], labels: [String], selectedIndex: Int, metrics: SwitcherMetrics, highlightPrefix: String = "", searchActive: Bool = false, searchQuery: String = "") {
+    func configure(rows: [SwitcherRow], labels: [String], selectedIndex: Int, metrics: SwitcherMetrics, highlightPrefix: String = "", searchActive: Bool = false, searchQuery: String = "", tabStripTitles: [String]? = nil, tabStripSelectedIndex: Int = 0) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         // Item frames depend only on the row count, the metrics, and whether the
@@ -97,10 +117,13 @@ final class SwitcherView: NSView {
         // valid, so skip invalidating it and forcing a full relayout + panel
         // resize. The item views still reconfigure below and relayout themselves
         // if their own content changed.
+        let stripActiveNew = (tabStripTitles?.isEmpty == false)
         let geometryChanged =
             rows.count != self.rows.count ||
             metrics != self.metrics ||
-            searchActive != self.searchActive
+            searchActive != self.searchActive ||
+            stripActiveNew != self.tabStripActive
+        self.tabStripActive = stripActiveNew
         self.rows = rows
         self.labels = labels
         self.highlightPrefix = highlightPrefix
@@ -109,6 +132,12 @@ final class SwitcherView: NSView {
         self.selectedIndex = selectedIndex
         searchBar.update(query: searchQuery)
         searchBar.isHidden = !searchActive
+        if let titles = tabStripTitles, !titles.isEmpty {
+            tabStrip.configure(titles: titles, selectedIndex: tabStripSelectedIndex, accent: accent)
+            tabStrip.isHidden = false
+        } else {
+            tabStrip.isHidden = true
+        }
         noResultsLabel.isHidden = !(searchActive && rows.isEmpty)
         let layoutModeChanged = metrics.layoutMode != self.metrics.layoutMode
         if metrics != self.metrics {
@@ -159,6 +188,36 @@ final class SwitcherView: NSView {
         guard rows.indices.contains(index) else { return }
         selectedIndex = index
         applySelection()
+    }
+
+    /// Move the tab strip's selection without rebuilding the rest of the
+    /// panel. Used on every tab arrow press; a full `configure(...)` would
+    /// repaint every row's icon/title/badges for no visual change.
+    func setTabStripSelectedIndex(_ index: Int) {
+        guard tabStripActive else { return }
+        tabStrip.setSelectedIndex(index)
+    }
+
+    /// Release the item view pool, cached row references, and any per-tile
+    /// `NSImage` retains so the `IconCache` (and `WindowThumbnailCache`) can
+    /// evict images that would otherwise stay live for the lifetime of the
+    /// process. Called by `SwitcherController` after `panel.dismiss()` —
+    /// next reveal rebuilds the pool from scratch (~10ms on first paint).
+    func releaseIdleResources() {
+        for v in itemViews {
+            v.removeFromSuperview()
+        }
+        itemViews.removeAll(keepingCapacity: false)
+        rows = []
+        labels = []
+        cachedLayout = nil
+        appliedSelectedIndex = -1
+        hoveredIndex = -1
+        tabStripActive = false
+        tabStrip.isHidden = true
+        searchBar.isHidden = true
+        noResultsLabel.isHidden = true
+        WindowThumbnailCache.shared.onReady = nil
     }
 
     var selectedRow: SwitcherRow? {
@@ -314,9 +373,23 @@ final class SwitcherView: NSView {
     }
 
     private func applySelection() {
-        for (i, view) in itemViews.enumerated() {
-            view.isSelected = (i == selectedIndex)
+        // Incremental: deselect the previous tile, select the new one. With
+        // dozens of rows that's a 2-write update instead of one per row. The
+        // -1 sentinel (or an out-of-bounds index after a configure pass)
+        // forces a one-time full pass to sync state.
+        let prev = appliedSelectedIndex
+        if prev == selectedIndex { return }
+        if itemViews.indices.contains(prev) {
+            itemViews[prev].isSelected = false
+        } else {
+            for (i, view) in itemViews.enumerated() where i != selectedIndex {
+                view.isSelected = false
+            }
         }
+        if itemViews.indices.contains(selectedIndex) {
+            itemViews[selectedIndex].isSelected = true
+        }
+        appliedSelectedIndex = selectedIndex
     }
 
     private func makeItemView() -> SwitcherItemViewProtocol {
@@ -340,6 +413,11 @@ final class SwitcherView: NSView {
             let v = itemViews.removeLast()
             v.removeFromSuperview()
         }
+        // `configure` writes `isSelected` directly below, so the next
+        // `applySelection` call should not assume the previous selection is
+        // still showing — invalidate it so the incremental path performs a
+        // safety sync pass instead of toggling a stale tile.
+        appliedSelectedIndex = -1
         for (i, row) in rows.enumerated() {
             // Quick-jump labels are inert in search mode (typing builds the
             // query, not a label jump), so suppress them to avoid confusion.
@@ -364,10 +442,15 @@ final class SwitcherView: NSView {
     private var reservedSearchHeight: CGFloat {
         searchActive ? searchBarHeight + metrics.outerPadding : 0
     }
+    /// Height the tab strip occupies under the list (with a gap).
+    private var tabStripHeight: CGFloat { TabStripView.stripHeight }
+    private var reservedTabStripHeight: CGFloat {
+        tabStripActive ? tabStripHeight + metrics.outerPadding : 0
+    }
 
     override var intrinsicContentSize: NSSize {
         var size = computeLayout().total
-        size.height += reservedSearchHeight
+        size.height += reservedSearchHeight + reservedTabStripHeight
         return size
     }
 
@@ -389,15 +472,26 @@ final class SwitcherView: NSView {
             )
         }
 
-        // List occupies the region below the reserved search strip; center it
-        // there so the layout matches the non-search case when inactive.
-        let listAreaHeight = bounds.height - reservedSearchHeight
+        // List occupies the region below the reserved search strip and above
+        // the reserved tab strip; center it there so the layout matches the
+        // non-search/non-drill case when both are inactive.
+        let listAreaHeight = bounds.height - reservedSearchHeight - reservedTabStripHeight
+        let listOriginY = reservedTabStripHeight + (listAreaHeight - info.listSize.height) / 2
         let listOrigin = NSPoint(
             x: (bounds.width - info.listSize.width) / 2,
-            y: (listAreaHeight - info.listSize.height) / 2
+            y: listOriginY
         )
         listContainer.frame = NSRect(origin: listOrigin, size: info.listSize)
-        noResultsLabel.frame = NSRect(x: 0, y: 0, width: bounds.width, height: listAreaHeight)
+        noResultsLabel.frame = NSRect(x: 0, y: reservedTabStripHeight, width: bounds.width, height: listAreaHeight)
+
+        if tabStripActive {
+            tabStrip.frame = NSRect(
+                x: outer,
+                y: outer,
+                width: max(0, bounds.width - outer * 2),
+                height: tabStripHeight
+            )
+        }
 
         for (i, rect) in info.frames.enumerated() where i < itemViews.count {
             itemViews[i].frame = rect

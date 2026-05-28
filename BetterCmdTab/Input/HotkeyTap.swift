@@ -23,6 +23,12 @@ final class HotkeyTap {
         case minimizeWindow
         case hideApp
         case quitApp
+        case forceQuitApp
+        case enterTabDrill
+        case exitTabDrill
+        case tabPrev
+        case tabNext
+        case commitTab
         case letterInput(Character)
         case toggleSearch
         case searchInput(Character)
@@ -72,6 +78,9 @@ final class HotkeyTap {
     /// space and the w/m/h/q action letters) become query text and Delete
     /// becomes backspace, instead of driving navigation/actions.
     private let searchModeFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
+    /// True while the switcher is in browser-tab drill-in. Nav keys reroute to
+    /// `.tabPrev`/`.tabNext`, Esc exits the drill, Cmd release commits the tab.
+    private let tabDrillFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
     /// When true, a discrete mouse-wheel scroll steps the open switcher's
     /// selection. Continuous (trackpad / precise) scrolls are always ignored.
     private let scrollEnabledFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
@@ -95,6 +104,9 @@ final class HotkeyTap {
     private static let mKey: Int64 = 46
     private static let hKey: Int64 = 4
     private static let qKey: Int64 = 12
+    /// kVK_ANSI_Backslash. Used to drop into browser tab drill-in on the
+    /// highlighted row when the experimental pref is enabled.
+    private static let backslashKey: Int64 = 42
 
     /// Letters reserved for hotkey actions (close/minimize/hide/quit). UCKey-
     /// Translate may emit one of these on a non-QWERTY layout for a different
@@ -206,6 +218,12 @@ final class HotkeyTap {
     /// printable keystrokes into the search query.
     func setSearchMode(_ value: Bool) {
         searchModeFlag.withLock { $0 = value }
+    }
+
+    /// Enter/leave browser tab drill-in. Read by the tap callback to reroute
+    /// nav keys to `.tabPrev`/`.tabNext` and commit on modifier release.
+    func setTabDrillActive(_ value: Bool) {
+        tabDrillFlag.withLock { $0 = value }
     }
 
     /// Enable/disable stepping the open switcher with a mouse scroll wheel.
@@ -321,6 +339,7 @@ final class HotkeyTap {
         // The switcher stays open while either trigger's hold modifier is down.
         let anyModHeld = appModHeld || windowModHeld
         let shiftHeld = flags.contains(.maskShift)
+        let tabDrillNow = tabDrillFlag.withLock { $0 }
         // Option + arrow (while the switcher is open) moves the highlighted
         // window between displays/Spaces instead of moving the selection. Option
         // is used rather than Shift because Shift already steps the selection
@@ -329,6 +348,37 @@ final class HotkeyTap {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
         if type == .keyDown {
+            // Browser tab drill-in: while drilled, the usual nav chords step
+            // through the tab strip instead of the app list. Esc exits the
+            // drill (one level up — the panel stays open).
+            if tabDrillNow && isSwitchingNow() {
+                if anyModHeld && keyCode == cfg.appKey {
+                    deliver(shiftHeld ? .tabPrev : .tabNext); return nil
+                }
+                if keyCode == Self.escKey {
+                    deliver(.exitTabDrill); return nil
+                }
+                if keyCode == Self.leftArrow {
+                    deliver(.tabPrev); return nil
+                }
+                if keyCode == Self.rightArrow {
+                    deliver(.tabNext); return nil
+                }
+                if keyCode == Self.returnKey || keyCode == Self.keypadEnterKey || keyCode == Self.spaceKey {
+                    deliver(.commitTab); return nil
+                }
+                // Backslash toggles the strip back off — same key in/out, so
+                // the user can dismiss the drill without reaching for Esc.
+                if keyCode == Self.backslashKey {
+                    deliver(.exitTabDrill); return nil
+                }
+                if let ch = translate(keyCode: UInt16(keyCode)), ch == "\\" {
+                    deliver(.exitTabDrill); return nil
+                }
+                // Any other key while drilled is swallowed so it doesn't
+                // accidentally fire app-level actions (Q/W/M/H, letter jump).
+                return nil
+            }
             if appModHeld && keyCode == cfg.appKey {
                 let dir: Event = shiftHeld ? .prevApp : .nextApp
                 deliver(dir)
@@ -342,6 +392,12 @@ final class HotkeyTap {
             if anyModHeld && keyCode == Self.escKey {
                 deliver(.escape)
                 return nil
+            }
+            // Drill-in trigger — backslash while the switcher is open.
+            // Controller no-ops if the highlighted row has no tab group or the
+            // experimental pref is off, so this is safe to always emit.
+            if isSwitchingNow() && keyCode == Self.backslashKey {
+                deliver(.enterTabDrill); return nil
             }
 
             if isSwitchingNow() {
@@ -398,9 +454,20 @@ final class HotkeyTap {
                     case Self.hKey:
                         deliver(.hideApp); return nil
                     case Self.qKey:
-                        deliver(.quitApp); return nil
+                        // ⌘+⌥+Q escalates to SIGKILL; bare ⌘+Q is the graceful
+                        // terminate(). Option is already tracked above for the
+                        // arrow-key move-window chords — reuse the same flag.
+                        deliver(optionHeld ? .forceQuitApp : .quitApp); return nil
                     default:
                         if let letter = translate(keyCode: UInt16(keyCode)) {
+                            // Layout-agnostic drill-in trigger: regardless of
+                            // where `\` lives on the physical keyboard (US,
+                            // Polish, ISO/JIS), any key that types `\` enters
+                            // tab drill-in.
+                            if letter == "\\" {
+                                deliver(.enterTabDrill)
+                                return nil
+                            }
                             let lower = Character(letter.lowercased())
                             if lower.isLetter,
                                let ascii = lower.asciiValue,

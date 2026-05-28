@@ -24,6 +24,9 @@ struct SwitcherRow {
     /// it, avoiding a no-window→hidden flash. `isHidden` is read live, so if the
     /// app hides before then the row already shows the hidden glyph.
     let suppressNoWindowGlyph: Bool
+    /// `AXTabs` children of this row's window, propagated from `WindowInfo`.
+    /// Non-empty only when the window has a tab group with 2+ tabs.
+    let tabs: [AXUIElement]
 
     init(
         app: NSRunningApplication,
@@ -32,7 +35,8 @@ struct SwitcherRow {
         isMinimized: Bool,
         isFullscreen: Bool = false,
         isPlaceholder: Bool = false,
-        suppressNoWindowGlyph: Bool = false
+        suppressNoWindowGlyph: Bool = false,
+        tabs: [AXUIElement] = []
     ) {
         self.subject = .running(app)
         self.window = window
@@ -41,6 +45,7 @@ struct SwitcherRow {
         self.isFullscreen = isFullscreen
         self.isPlaceholder = isPlaceholder
         self.suppressNoWindowGlyph = suppressNoWindowGlyph
+        self.tabs = tabs
     }
 
     /// A not-yet-running app surfaced in search so it can be launched.
@@ -52,6 +57,7 @@ struct SwitcherRow {
         self.isFullscreen = false
         self.isPlaceholder = false
         self.suppressNoWindowGlyph = false
+        self.tabs = []
     }
 
     /// A recently closed window/app surfaced in search so it can be reopened.
@@ -63,7 +69,11 @@ struct SwitcherRow {
         self.isFullscreen = false
         self.isPlaceholder = false
         self.suppressNoWindowGlyph = false
+        self.tabs = []
     }
+
+    /// True when this row has a tab group worth drilling into.
+    var hasTabs: Bool { tabs.count > 1 }
 
     /// The backing running application, or `nil` for a launchable/recent row.
     var app: NSRunningApplication? {

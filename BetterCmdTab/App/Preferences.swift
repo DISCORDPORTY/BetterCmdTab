@@ -188,18 +188,22 @@ enum PanelSize: String, CaseIterable {
     case standard
     case large
 
+    // Scale remap (2026-05-28): old Small was too tight; the new Small is
+    // what used to be Default, Medium is what used to be Large, and Large is
+    // a genuinely big tile. Raw values stay the same so persisted prefs
+    // still parse — users transparently shift up one notch on first launch.
     var scale: CGFloat {
         switch self {
-        case .small: return 0.85
-        case .standard: return 1.0
-        case .large: return 1.2
+        case .small: return 1.0
+        case .standard: return 1.2
+        case .large: return 1.5
         }
     }
 
     var displayName: String {
         switch self {
         case .small: return "Small"
-        case .standard: return "Default"
+        case .standard: return "Medium"
         case .large: return "Large"
         }
     }
@@ -258,6 +262,7 @@ final class Preferences: ObservableObject {
         static let scrollToSwitch = "Switcher.scrollToSwitch"
         static let scrollReverseDirection = "Switcher.scrollReverseDirection"
         static let experimentalInstantSpaceSwitch = "Switcher.experimentalInstantSpaceSwitch"
+        static let experimentalTabDrillIn = "Switcher.experimentalTabDrillIn"
         static let showUnreadBadges = "Switcher.showUnreadBadges"
         /// Pre-graduation key (badges used to live behind the Experimental tab);
         /// read once at launch to carry a user's earlier choice over to the new key.
@@ -275,6 +280,7 @@ final class Preferences: ObservableObject {
         static let hoverShowMaximize = "Switcher.hoverShowMaximize"
         static let hoverShowHide = "Switcher.hoverShowHide"
         static let hoverShowQuit = "Switcher.hoverShowQuit"
+        static let hoverShowForceQuit = "Switcher.hoverShowForceQuit"
     }
 
     @Published var switcherLayoutMode: SwitcherLayoutMode {
@@ -523,6 +529,17 @@ final class Preferences: ObservableObject {
         }
     }
 
+    /// Browser/Finder tab drill-in: pressing `\` on a row with a tab group
+    /// reveals a horizontal tab strip beneath the switcher. Off by default —
+    /// depends on AX `AXTabs`/`AXPress` which varies in reliability across
+    /// browsers and ships changes.
+    @Published var experimentalTabDrillIn: Bool {
+        didSet {
+            guard oldValue != experimentalTabDrillIn else { return }
+            UserDefaults.standard.set(experimentalTabDrillIn, forKey: Keys.experimentalTabDrillIn)
+        }
+    }
+
     /// Show app unread-badge counts (e.g. Mail's unread mail) on switcher rows,
     /// read from the Dock via the Accessibility API. On by default.
     @Published var showUnreadBadges: Bool {
@@ -643,6 +660,15 @@ final class Preferences: ObservableObject {
         }
     }
 
+    /// Force-quit button visibility — defaults off so the bar stays uncluttered;
+    /// ⌘+⌥+Q is always available regardless of this toggle.
+    @Published var hoverShowForceQuit: Bool {
+        didSet {
+            guard oldValue != hoverShowForceQuit else { return }
+            UserDefaults.standard.set(hoverShowForceQuit, forKey: Keys.hoverShowForceQuit)
+        }
+    }
+
     /// Concrete accent color honoring the `.custom` choice (reads `customAccentHex`).
     var resolvedAccent: NSColor {
         if accentChoice == .custom, let hex = customAccentHex, let color = NSColor(hexString: hex) {
@@ -721,6 +747,7 @@ final class Preferences: ObservableObject {
         self.scrollToSwitch = defaults.object(forKey: Keys.scrollToSwitch) as? Bool ?? true
         self.scrollReverseDirection = defaults.object(forKey: Keys.scrollReverseDirection) as? Bool ?? false
         self.experimentalInstantSpaceSwitch = defaults.object(forKey: Keys.experimentalInstantSpaceSwitch) as? Bool ?? false
+        self.experimentalTabDrillIn = defaults.object(forKey: Keys.experimentalTabDrillIn) as? Bool ?? false
         // Badges graduated out of the Experimental tab and now default on. Honor
         // the new key if present, otherwise carry over a choice made under the
         // old experimental key, otherwise default to on.
@@ -748,5 +775,6 @@ final class Preferences: ObservableObject {
         self.hoverShowMaximize = defaults.object(forKey: Keys.hoverShowMaximize) as? Bool ?? true
         self.hoverShowHide = defaults.object(forKey: Keys.hoverShowHide) as? Bool ?? true
         self.hoverShowQuit = defaults.object(forKey: Keys.hoverShowQuit) as? Bool ?? true
+        self.hoverShowForceQuit = defaults.object(forKey: Keys.hoverShowForceQuit) as? Bool ?? false
     }
 }

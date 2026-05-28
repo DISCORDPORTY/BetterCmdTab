@@ -137,6 +137,40 @@ enum Activator {
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     }
 
+    /// Activate a specific tab inside `window`. Same window-bringing steps as
+     /// `activateRunning`, then press the tab's AX element so the host app
+     /// selects it. Some browsers (Chrome, Arc) respond to `kAXPressAction`;
+     /// others (Safari for non-current tabs) only flip selection via the
+     /// `kAXSelectedAttribute` write. Try the press first, then the attribute —
+     /// neither call short-circuits, so doing both is safe.
+    static func activateTab(in app: NSRunningApplication, window: AXUIElement, tab: AXUIElement, instantSpace: Bool) {
+        let pid = app.processIdentifier
+
+        if app.isHidden {
+            app.unhide()
+        }
+
+        var minimizedValue: AnyObject?
+        AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue)
+        if (minimizedValue as? Bool) == true {
+            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        }
+
+        let wid = PrivateAPI.cgWindowId(of: window)
+        let postedSpaceSwitch = instantSpace && wid != 0 && PrivateAPI.switchToSpace(ofWindow: wid)
+
+        activateProcess(app)
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        if wid != 0 && !postedSpaceSwitch {
+            PrivateAPI.raiseWindow(pid: pid, wid: wid)
+        }
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+
+        AXUIElementPerformAction(tab, kAXPressAction as CFString)
+        AXUIElementSetAttributeValue(tab, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+    }
+
     private static func activateProcess(_ app: NSRunningApplication) {
         if #available(macOS 14.0, *) {
             _ = app.activate(from: NSRunningApplication.current, options: [])
@@ -345,20 +379,37 @@ enum Activator {
         app.terminate()
     }
 
+    /// SIGKILL the row's app. Use when the AppleEvent that `terminate()` sends
+    /// is being ignored (hung event loop, runaway script). Finder is guarded
+    /// like `quitApp` — killing it would log the user out via launchd respawn
+    /// loops on some setups.
+    static func forceQuitApp(_ row: SwitcherRow) {
+        guard let app = row.app else { return }
+        if app.bundleIdentifier == finderBundleID {
+            return
+        }
+        let pid = app.processIdentifier
+        guard pid > 0 else { return }
+        kill(pid, SIGKILL)
+    }
+
     // MARK: - Move window between displays / Spaces
 
     /// Move the row's window to the adjacent display in `direction`, preserving
     /// its relative position within the screen and clamping it to fit. Uses the
     /// stable Accessibility position API — no private symbols.
     static func moveWindowToDisplay(_ row: SwitcherRow, direction: MoveDirection) {
-        guard let window = row.window, let app = row.app else { return }
-        let apply = { Self.repositionToAdjacentDisplay(window: window, direction: direction) }
-        // Our own window must mutate on the main thread (window-management
-        // constraint, as with close/minimize); other apps stay off-main.
-        if app.processIdentifier == getpid() {
-            DispatchQueue.main.async(execute: apply)
-        } else {
-            DispatchQueue.global(qos: .userInitiated).async(execute: apply)
+        guard let window = row.window, let _ = row.app else { return }
+        // Run on main regardless of target pid: `repositionToAdjacentDisplay`
+        // reads `NSScreen.screens`, which Apple documents as main-thread only.
+        // Under macOS Tahoe (26) off-main `NSScreen.screens` access triggers
+        // an `NSInternalInconsistencyException` (layout engine modified from a
+        // background thread) the next time AppKit lays out — sometimes
+        // immediately, sometimes on a later reveal. The AX position write is
+        // cheap (microseconds) so keeping the whole call on main has no
+        // latency cost worth chasing.
+        DispatchQueue.main.async {
+            Self.repositionToAdjacentDisplay(window: window, direction: direction)
         }
     }
 
