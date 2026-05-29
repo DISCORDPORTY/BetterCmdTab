@@ -31,6 +31,7 @@ enum SettingsAnchor {
     static let directActivation = "shortcuts.directActivation"
     static let scopedSwitch = "shortcuts.scopedSwitch"
     static let panelKeys = "shortcuts.panelKeys"
+    static let windowMgmt = "shortcuts.windowMgmt"
     // Privacy
     static let screenSharing = "privacy.screenSharing"
     static let permissions = "privacy.permissions"
@@ -67,6 +68,7 @@ enum SearchID {
     static let directActivation = "general.directActivation"
     static let scopedSwitch = "shortcuts.scopedSwitch"
     static let panelKeys = "shortcuts.panelKeys"
+    static let windowMgmt = "shortcuts.windowMgmt"
     static let exportSettings = "general.exportSettings"
     static let importSettings = "general.importSettings"
     // Switcher
@@ -225,6 +227,8 @@ enum SettingsCatalog {
              "Scoped shortcuts", ["scope", "scoped", "all windows", "current app", "minimized", "this space", "filtered switcher"]),
         item(SearchID.panelKeys, .shortcuts, SettingsAnchor.panelKeys, "Shortcuts", "In-panel keys",
              "Action keys while switching", ["panel keys", "rebind", "close", "minimize", "hide", "quit", "wmhq", "in-panel"]),
+        item(SearchID.windowMgmt, .shortcuts, SettingsAnchor.windowMgmt, "Shortcuts", "Window management",
+             "Arrange the highlighted window", ["window management", "tile", "maximize", "center", "snap", "halves", "arrange", "rebind"]),
 
         // Privacy · Screen sharing
         item(SearchID.hideFromScreenSharing, .privacy, SettingsAnchor.screenSharing, "Privacy", "Screen sharing",

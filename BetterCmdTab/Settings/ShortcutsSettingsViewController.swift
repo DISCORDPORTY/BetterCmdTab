@@ -19,6 +19,9 @@ final class ShortcutsSettingsViewController: SettingsTabViewController {
     // In-panel action keys (#5): one bare-key capture button per action.
     private var panelKeyButtons: [PanelKeyAction: KeyCaptureButton] = [:]
 
+    // Window-management chords (#7): one modifier+key capture button per action.
+    private var windowMgmtButtons: [WindowMgmtAction: KeyComboCaptureButton] = [:]
+
     override func setupContent() {
         // Switching section — the core ⌘Tab triggers. The trigger must include a
         // hold modifier (⌘/⌥/⌃); Shift is reserved for stepping backwards and is
@@ -110,6 +113,28 @@ final class ShortcutsSettingsViewController: SettingsTabViewController {
         resetButton.bezelStyle = .rounded
         resetButton.controlSize = .small
         addRow(to: panelKeys, title: "Defaults", subtitle: "Restore W / M / H / Q.", accessory: resetButton)
+
+        // Window management section — rebind the chords that arrange the
+        // highlighted window while the switcher is open (default ⌃ + arrows).
+        let windowMgmt = addSection(title: "Window management", anchor: SettingsAnchor.windowMgmt)
+        addRow(
+            to: windowMgmt,
+            title: "Arrange the highlighted window",
+            subtitle: "Tile, maximize, or center the highlighted window while the switcher is open. Each chord needs a modifier (⌃/⌥/⇧); ⌘ is held by the switcher.",
+            searchItemID: SearchID.windowMgmt
+        )
+        let wmBindings = Preferences.shared.windowMgmtBindings
+        for action in WindowMgmtAction.allCases {
+            let combo = wmBindings[action] ?? action.defaultCombo
+            let button = KeyComboCaptureButton(keyCode: combo.keyCode, modifiers: combo.modifiers)
+            button.onCapture = { [weak self] code, mods in self?.setWindowMgmt(action, code, mods) }
+            windowMgmtButtons[action] = button
+            addRow(to: windowMgmt, title: action.displayName, accessory: button)
+        }
+        let wmReset = NSButton(title: "Reset to defaults", target: self, action: #selector(resetWindowMgmt))
+        wmReset.bezelStyle = .rounded
+        wmReset.controlSize = .small
+        addRow(to: windowMgmt, title: "Defaults", subtitle: "Restore ⌃ + arrow keys.", accessory: wmReset)
     }
 
     override func viewWillAppear() {
@@ -197,6 +222,23 @@ final class ShortcutsSettingsViewController: SettingsTabViewController {
             panelKeyButtons[action]?.setKeyCode(action.defaultKeyCode)
         }
         Preferences.shared.panelKeyBindings = bindings
+    }
+
+    // MARK: - Window management chords
+
+    private func setWindowMgmt(_ action: WindowMgmtAction, _ keyCode: Int, _ modifiers: Int) {
+        var bindings = Preferences.shared.windowMgmtBindings
+        bindings[action] = KeyCombo(keyCode: keyCode, modifiers: modifiers)
+        Preferences.shared.windowMgmtBindings = bindings
+    }
+
+    @objc private func resetWindowMgmt() {
+        var bindings: [WindowMgmtAction: KeyCombo] = [:]
+        for action in WindowMgmtAction.allCases {
+            bindings[action] = action.defaultCombo
+            windowMgmtButtons[action]?.setCombo(keyCode: action.defaultCombo.keyCode, modifiers: action.defaultCombo.modifiers)
+        }
+        Preferences.shared.windowMgmtBindings = bindings
     }
 
     private static func appName(forBundleID bundleID: String) -> String? {

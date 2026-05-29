@@ -306,6 +306,12 @@ final class SwitcherController: SwitcherViewDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.pushPanelKeyBindings() }
             .store(in: &cancellables)
+        // Rebindable window-management chords (#7): same pattern.
+        pushWindowMgmtBindings()
+        Preferences.shared.$windowMgmtBindings
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.pushWindowMgmtBindings() }
+            .store(in: &cancellables)
         // The BetterShortcuts recorders persist the user's trigger choices and
         // post this notification on change — re-derive the tap config live.
         NotificationCenter.default.publisher(
@@ -477,6 +483,27 @@ final class SwitcherController: SwitcherViewDelegate {
             map[Int64(keyCode)] = tapAction
         }
         hotkey.setPanelKeyBindings(map)
+    }
+
+    /// Translate the user's `windowMgmtBindings` (action → KeyCombo) into the
+    /// tap's packed-chord → Event map and push it. Re-derived on launch and on
+    /// every change.
+    private func pushWindowMgmtBindings() {
+        var map: [Int: HotkeyTap.Event] = [:]
+        for (action, combo) in Preferences.shared.windowMgmtBindings {
+            let event: HotkeyTap.Event
+            switch action {
+            case .tileLeft: event = .tileLeft
+            case .tileRight: event = .tileRight
+            case .maximize: event = .maximizeWindow
+            case .center: event = .centerWindow
+            }
+            // A chord with no modifier would hijack a bare key; the tap ignores
+            // modBits == 0, so skip those defensively here too.
+            guard combo.modifiers != 0 else { continue }
+            map[HotkeyTap.wmChordKey(keyCode: Int64(combo.keyCode), modBits: combo.modifiers)] = event
+        }
+        hotkey.setWindowMgmtBindings(map)
     }
 
     private func pushHotkeyConfig() {
@@ -716,17 +743,30 @@ final class SwitcherController: SwitcherViewDelegate {
     /// toggle when that toggle is off (the cache already dropped other-Space
     /// windows otherwise — documented edge case).
     private func scopeFiltered(_ rows: [SwitcherRow], scope: SwitchScope) -> [SwitcherRow] {
+        let windowed = rows.filter { $0.window != nil }
+        let filtered: [SwitcherRow]
         switch scope {
         case .allAppsAllSpaces:
-            return rows.filter { $0.window != nil }
+            filtered = windowed
         case .allAppsCurrentSpace:
-            return CatalogFilter.filterToCurrentSpace(rows.filter { $0.window != nil })
+            filtered = CatalogFilter.filterToCurrentSpace(windowed)
         case .currentAppWindows:
-            guard let pid = scopeFrontPid else { return [] }
-            return rows.filter { $0.pid == pid && $0.window != nil }
+            if let pid = scopeFrontPid {
+                filtered = windowed.filter { $0.pid == pid }
+            } else {
+                filtered = []
+            }
         case .minimizedOnly:
-            return rows.filter { $0.isMinimized && $0.window != nil }
+            filtered = windowed.filter { $0.isMinimized }
         }
+        // Never dead-end: if the scope matched nothing but there are windows to
+        // show, fall back to all windows so the shortcut still opens a useful
+        // panel instead of a silent no-op (e.g. "Minimized" bound while nothing
+        // is minimized, or "Current app" when the front app has no AX windows).
+        if filtered.isEmpty && !windowed.isEmpty {
+            return windowed
+        }
+        return filtered
     }
 
     private func prewarmPanel() {
@@ -749,28 +789,6 @@ final class SwitcherController: SwitcherViewDelegate {
         guard tabDrillActive, tabTitles.indices.contains(index) else { return }
         tabIndex = index
         commitTab()
-    }
-
-    /// A drag dwelled over a row (#8): raise that row's app/window so the user
-    /// can drop a file into it without leaving the switcher. The switcher stays
-    /// open and never consumes the drop — it's a spring-loaded raise only. Detach
-    /// from the held modifier so a later ⌘ release doesn't also commit.
-    func switcherViewDidDragOverRow(index: Int) {
-        guard phase == .visible, rows.indices.contains(index) else { return }
-        self.index = index
-        view.setSelectedIndex(index)
-        stickyOpen = true
-        let row = rows[index]
-        if let app = row.app {
-            if let window = row.window {
-                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            }
-            if #available(macOS 14.0, *) {
-                _ = app.activate(from: NSRunningApplication.current, options: [])
-            } else {
-                app.activate(options: [.activateIgnoringOtherApps])
-            }
-        }
     }
 
     func switcherViewDidHoverTab(_ index: Int) {

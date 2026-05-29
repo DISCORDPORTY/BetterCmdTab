@@ -118,6 +118,25 @@ final class HotkeyTap {
     private let panelKeyMap = OSAllocatedUnfairLock<[Int64: PanelActionKey]>(
         initialState: [13: .close, 46: .minimize, 4: .hide, 12: .quit]
     )
+    /// Rebindable window-management chords (#7): packed chord key (see
+    /// `wmChordKey`) → the arrange `Event`. Checked in the switching branch
+    /// before the plain-arrow handling. Pushed from main via
+    /// `setWindowMgmtBindings`; defaults to ⌃+arrow until set.
+    private let windowMgmtMap = OSAllocatedUnfairLock<[Int: Event]>(
+        initialState: [
+            wmChordKey(keyCode: 123, modBits: 1): .tileLeft,   // ⌃←
+            wmChordKey(keyCode: 124, modBits: 1): .tileRight,  // ⌃→
+            wmChordKey(keyCode: 126, modBits: 1): .maximizeWindow, // ⌃↑
+            wmChordKey(keyCode: 125, modBits: 1): .centerWindow,   // ⌃↓
+        ]
+    )
+
+    /// Pack a (keyCode, modifier-bits) chord into a single dictionary key.
+    /// `modBits`: control = 1, option = 2, shift = 4 (Command excluded — it's the
+    /// switcher's hold key). Shifting by 3 leaves room for the 3 modifier bits.
+    static func wmChordKey(keyCode: Int64, modBits: Int) -> Int {
+        (Int(keyCode) << 3) | (modBits & 0b111)
+    }
     private let config = OSAllocatedUnfairLock<Config>(
         initialState: Config(appModifier: .maskCommand, appKey: 48, windowModifier: .maskCommand, windowKey: 50)
     )
@@ -298,6 +317,12 @@ final class HotkeyTap {
     /// from main on launch and on every preference change; read on the tap thread.
     func setPanelKeyBindings(_ map: [Int64: PanelActionKey]) {
         panelKeyMap.withLock { $0 = map }
+    }
+
+    /// Replace the rebindable window-management chord map (packed chord → Event).
+    /// Pushed from main on launch and on every preference change.
+    func setWindowMgmtBindings(_ map: [Int: Event]) {
+        windowMgmtMap.withLock { $0 = map }
     }
 
     private func isSwitchingNow() -> Bool {
@@ -517,22 +542,31 @@ final class HotkeyTap {
                         break
                     }
                 } else {
+                    // Rebindable window-management chords (#7): if the current
+                    // modifier+key matches a configured chord (default ⌃+arrow),
+                    // arrange the highlighted window. Checked before the plain
+                    // arrow handling so a bound chord wins; a chord needs ≥1 of
+                    // ⌃/⌥/⇧ so bare arrows still navigate.
+                    let wmBits = (controlHeld ? 1 : 0) | (optionHeld ? 2 : 0) | (shiftHeld ? 4 : 0)
+                    if wmBits != 0 {
+                        let chord = Self.wmChordKey(keyCode: keyCode, modBits: wmBits)
+                        if let wmEvent = windowMgmtMap.withLock({ $0[chord] }) {
+                            deliver(wmEvent)
+                            return nil
+                        }
+                    }
                     switch keyCode {
                     case Self.leftArrow:
-                        if controlHeld { deliver(.tileLeft) }
-                        else { deliver(optionHeld ? .moveWindowLeft : .spatialLeft) }
+                        deliver(optionHeld ? .moveWindowLeft : .spatialLeft)
                         return nil
                     case Self.rightArrow:
-                        if controlHeld { deliver(.tileRight) }
-                        else { deliver(optionHeld ? .moveWindowRight : .spatialRight) }
+                        deliver(optionHeld ? .moveWindowRight : .spatialRight)
                         return nil
                     case Self.upArrow:
-                        if controlHeld { deliver(.maximizeWindow) }
-                        else { deliver(optionHeld ? .moveWindowUp : .prevRow) }
+                        deliver(optionHeld ? .moveWindowUp : .prevRow)
                         return nil
                     case Self.downArrow:
-                        if controlHeld { deliver(.centerWindow) }
-                        else { deliver(optionHeld ? .moveWindowDown : .nextRow) }
+                        deliver(optionHeld ? .moveWindowDown : .nextRow)
                         return nil
                     case Self.returnKey, Self.keypadEnterKey, Self.spaceKey:
                         deliver(.commit); return nil

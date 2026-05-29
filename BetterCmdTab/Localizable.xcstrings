@@ -50,6 +50,38 @@
         "es" : { "stringUnit" : { "state" : "translated", "value" : "Apps" } }
       }
     },
+    "Center" : {
+      "localizations" : {
+        "pl" : { "stringUnit" : { "state" : "translated", "value" : "Wyśrodkuj" } },
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Zentrieren" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Centrer" } },
+        "es" : { "stringUnit" : { "state" : "translated", "value" : "Centrar" } }
+      }
+    },
+    "Maximize" : {
+      "localizations" : {
+        "pl" : { "stringUnit" : { "state" : "translated", "value" : "Maksymalizuj" } },
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Maximieren" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Agrandir" } },
+        "es" : { "stringUnit" : { "state" : "translated", "value" : "Maximizar" } }
+      }
+    },
+    "Tile left half" : {
+      "localizations" : {
+        "pl" : { "stringUnit" : { "state" : "translated", "value" : "Lewa połowa" } },
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Linke Hälfte" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Moitié gauche" } },
+        "es" : { "stringUnit" : { "state" : "translated", "value" : "Mitad izquierda" } }
+      }
+    },
+    "Tile right half" : {
+      "localizations" : {
+        "pl" : { "stringUnit" : { "state" : "translated", "value" : "Prawa połowa" } },
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Rechte Hälfte" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Moitié droite" } },
+        "es" : { "stringUnit" : { "state" : "translated", "value" : "Mitad derecha" } }
+      }
+    },
     "Blue" : {
       "localizations" : {
         "pl" : { "stringUnit" : { "state" : "translated", "value" : "Niebieski" } },
