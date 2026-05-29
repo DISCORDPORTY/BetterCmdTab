@@ -99,6 +99,12 @@ final class HotkeyTap {
     /// tap thread without touching AppKit. `nil` while the panel is hidden.
     /// Published by SwitcherController on present/dismiss and on every relayout.
     private let switcherFrame = OSAllocatedUnfairLock<CGRect?>(initialState: nil)
+    /// When true, the *initial* trigger chord (⌘Tab / ⌘`) is passed through to
+    /// the focused app instead of opening the switcher — the "Ignore shortcuts"
+    /// per-app exception. Recomputed on main from the frontmost app and pushed
+    /// here; only consulted while the switcher is idle (an already-open switcher
+    /// keeps navigating normally).
+    private let suppressTriggerFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
     private let config = OSAllocatedUnfairLock<Config>(
         initialState: Config(appModifier: .maskCommand, appKey: 48, windowModifier: .maskCommand, windowKey: 50)
     )
@@ -255,6 +261,13 @@ final class HotkeyTap {
     /// Enable/disable click-outside-to-dismiss for the open switcher.
     func setClickOutsideDismiss(_ value: Bool) {
         clickDismissFlag.withLock { $0 = value }
+    }
+
+    /// Suppress (pass through) the initial trigger chord for the frontmost app —
+    /// the "Ignore shortcuts" exception. Pushed from main on frontmost-app and
+    /// active-Space changes.
+    func setSuppressTrigger(_ value: Bool) {
+        suppressTriggerFlag.withLock { $0 = value }
     }
 
     /// Publish the open switcher panel's frame in CGEvent global (top-left
@@ -424,12 +437,18 @@ final class HotkeyTap {
                 // accidentally fire app-level actions (Q/W/M/H, letter jump).
                 return nil
             }
+            // "Ignore shortcuts" exception: while idle, let the trigger chord
+            // fall through to the focused app instead of opening the switcher.
+            // Only when not already switching — an open switcher still navigates.
+            let suppressTrigger = !isSwitchingNow() && suppressTriggerFlag.withLock { $0 }
             if appModHeld && keyCode == cfg.appKey {
+                if suppressTrigger { return Unmanaged.passUnretained(event) }
                 let dir: Event = shiftHeld ? .prevApp : .nextApp
                 deliver(dir)
                 return nil
             }
             if windowModHeld && keyCode == cfg.windowKey {
+                if suppressTrigger { return Unmanaged.passUnretained(event) }
                 let dir: Event = shiftHeld ? .prevWindow : .nextWindow
                 deliver(dir)
                 return nil

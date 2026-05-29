@@ -31,6 +31,34 @@ struct PreferencesEnumTests {
         // Unknown raw value yields nil so callers fall back to the default.
         #expect(SearchDismissMode(rawValue: "nonsense") == nil)
     }
+
+    @Test("HideWindowsMode / IgnoreShortcutsMode round-trip through raw values")
+    func exceptionModeRawValues() {
+        for mode in HideWindowsMode.allCases {
+            #expect(HideWindowsMode(rawValue: mode.rawValue) == mode)
+            #expect(!mode.displayName.isEmpty)
+        }
+        for mode in IgnoreShortcutsMode.allCases {
+            #expect(IgnoreShortcutsMode(rawValue: mode.rawValue) == mode)
+            #expect(!mode.displayName.isEmpty)
+        }
+        #expect(HideWindowsMode(rawValue: "nonsense") == nil)
+        #expect(IgnoreShortcutsMode(rawValue: "nonsense") == nil)
+    }
+
+    @Test("AppException round-trips through its stored dictionary")
+    func appExceptionDictionary() {
+        let original = AppException(bundleID: "com.x", hide: .whenNoWindows, ignore: .whenFullscreen)
+        #expect(AppException(dictionary: original.dictionary) == original)
+
+        // Missing modes fall back to the neutral defaults.
+        let partial = AppException(dictionary: ["bundleID": "com.y"])
+        #expect(partial == AppException(bundleID: "com.y", hide: .dontHide, ignore: .never))
+
+        // No bundle ID → no exception.
+        #expect(AppException(dictionary: ["hide": "always"]) == nil)
+        #expect(AppException(dictionary: ["bundleID": ""]) == nil)
+    }
 }
 
 @Suite("BetterShortcuts integration")

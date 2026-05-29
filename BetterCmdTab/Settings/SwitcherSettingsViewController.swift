@@ -39,13 +39,6 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
     private let hoverQuitSwitch = NSSwitch()
     private let hoverForceQuitSwitch = NSSwitch()
 
-    // Apps
-    private let excludedButton = NSButton(title: "Manage apps", target: nil, action: nil)
-    private let pinnedButton = NSButton(title: "Manage apps", target: nil, action: nil)
-    private var excludedRow: SettingsRowView!
-    private var pinnedRow: SettingsRowView!
-    private var appsSheet: AppsPickerSheetWindowController?
-
     private var cancellables = Set<AnyCancellable>()
 
     override func setupContent() {
@@ -147,29 +140,13 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
                subtitle: "Sends SIGKILL — for hung apps that ignore Quit. ⌘+⌥+Q always works regardless.",
                accessory: hoverForceQuitSwitch)
 
-        // App lists section — exclusion and pinning, each via a picker sheet.
-        let appLists = addSection(title: "Apps", anchor: SettingsAnchor.apps)
-        configureManageButton(excludedButton, action: #selector(manageExcluded))
-        excludedRow = addRow(to: appLists, title: "Excluded apps",
-                             subtitle: "Never shown in the switcher.",
-                             accessory: excludedButton, searchItemID: SearchID.excludedApps)
-        configureManageButton(pinnedButton, action: #selector(managePinned))
-        pinnedRow = addRow(to: appLists, title: "Pinned apps",
-                           subtitle: "Always shown first, before recents.",
-                           accessory: pinnedButton, searchItemID: SearchID.pinnedApps)
+        // Per-app rules (hide / ⌘Tab) and pinned apps now live in the Apps tab.
     }
 
     private func configureSwitch(_ toggle: NSSwitch, action: Selector) {
         toggle.controlSize = .small
         toggle.target = self
         toggle.action = action
-    }
-
-    private func configureManageButton(_ button: NSButton, action: Selector) {
-        button.bezelStyle = .rounded
-        button.controlSize = .small
-        button.target = self
-        button.action = action
     }
 
     override func viewWillAppear() {
@@ -200,20 +177,10 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
         hoverQuitSwitch.state = prefs.hoverShowQuit ? .on : .off
         hoverForceQuitSwitch.state = prefs.hoverShowForceQuit ? .on : .off
         setHoverSubOptionsEnabled(prefs.hoverActionsEnabled)
-        updateAppListCounts()
 
         prefs.$searchDismissMode
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.selectSearchMode($0) }
-            .store(in: &cancellables)
-
-        prefs.$excludedBundleIDs
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.excludedRow?.update(subtitle: Self.countDescription($0.count, suffix: "never shown in the switcher.")) }
-            .store(in: &cancellables)
-        prefs.$pinnedBundleIDs
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.pinnedRow?.update(subtitle: Self.countDescription($0.count, suffix: "always shown first.")) }
             .store(in: &cancellables)
     }
 
@@ -337,61 +304,5 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
 
     private func selectSearchMode(_ mode: SearchDismissMode) {
         if let i = searchDismissModes.firstIndex(of: mode) { searchModePopup.selectItem(at: i) }
-    }
-
-    @objc private func manageExcluded() {
-        presentAppsSheet(
-            title: "Excluded Apps",
-            prompt: "Selected apps are hidden from the switcher entirely.",
-            selected: Preferences.shared.excludedBundleIDs
-        ) { selection in
-            Preferences.shared.excludedBundleIDs = selection
-        }
-    }
-
-    @objc private func managePinned() {
-        presentAppsSheet(
-            title: "Pinned Apps",
-            prompt: "Selected apps are forced to the front of the switcher, before recents.",
-            selected: Set(Preferences.shared.pinnedBundleIDs)
-        ) { selection in
-            // Preserve existing pin order; append newly-checked apps at the end.
-            let current = Preferences.shared.pinnedBundleIDs
-            var order = current.filter { selection.contains($0) }
-            for bid in selection where !order.contains(bid) { order.append(bid) }
-            Preferences.shared.pinnedBundleIDs = order
-        }
-    }
-
-    private func presentAppsSheet(
-        title: String,
-        prompt: String,
-        selected: Set<String>,
-        onDone: @escaping (Set<String>) -> Void
-    ) {
-        guard let window = view.window, appsSheet == nil else { return }
-        let controller = AppsPickerSheetWindowController(
-            title: title,
-            prompt: prompt,
-            selectedBundleIDs: selected,
-            onDone: onDone
-        )
-        controller.onDidDismiss = { [weak self] in
-            self?.appsSheet = nil
-            self?.updateAppListCounts()
-        }
-        appsSheet = controller
-        controller.present(asSheetFor: window)
-    }
-
-    private func updateAppListCounts() {
-        let prefs = Preferences.shared
-        excludedRow?.update(subtitle: Self.countDescription(prefs.excludedBundleIDs.count, suffix: "never shown in the switcher."))
-        pinnedRow?.update(subtitle: Self.countDescription(prefs.pinnedBundleIDs.count, suffix: "always shown first."))
-    }
-
-    private static func countDescription(_ count: Int, suffix: String) -> String {
-        let prefix = count == 0 ? "None" : "\(count) app\(count == 1 ? "" : "s")"
-        return "\(prefix) — \(suffix)"
     }
 }

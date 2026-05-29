@@ -11,6 +11,7 @@ enum SettingsTabID {
     static let general = "general"
     static let shortcuts = "shortcuts"
     static let switcher = "switcher"
+    static let apps = "apps"
     static let appearance = "appearance"
     static let privacy = "privacy"
     static let experimental = "experimental"
@@ -35,7 +36,9 @@ enum SettingsAnchor {
     static let search = "switcher.search"
     static let navigation = "switcher.navigation"
     static let actions = "switcher.actions"
-    static let apps = "switcher.apps"
+    // Apps
+    static let appRules = "apps.rules"
+    static let pinned = "apps.pinned"
     // Appearance
     static let appearance = "appearance.switcher"
     // Experimental
@@ -75,7 +78,7 @@ enum SearchID {
     static let scrollReverse = "switcher.scrollReverse"
     static let clickDismiss = "switcher.clickDismiss"
     static let hoverActions = "switcher.hoverActions"
-    static let excludedApps = "switcher.excludedApps"
+    static let exceptions = "switcher.exceptions"
     static let pinnedApps = "switcher.pinnedApps"
     // Appearance
     static let layout = "appearance.layout"
@@ -107,6 +110,7 @@ enum SettingsCatalog {
                 case SettingsTabID.general:      return GeneralSettingsViewController()
                 case SettingsTabID.shortcuts:    return ShortcutsSettingsViewController()
                 case SettingsTabID.switcher:     return SwitcherSettingsViewController()
+                case SettingsTabID.apps:         return AppsSettingsViewController()
                 case SettingsTabID.appearance:   return AppearanceSettingsViewController()
                 case SettingsTabID.privacy:      return PrivacySettingsViewController()
                 case SettingsTabID.experimental: return ExperimentalSettingsViewController()
@@ -137,6 +141,11 @@ enum SettingsCatalog {
         SettingsTab(
             id: SettingsTabID.switcher, title: "Switcher", icon: "rectangle.stack.fill",
             iconStyle: style(0xB272FF, 0x6228FF, scale: 0.95)
+        ),
+        // Per-app rules (hide / ⌘Tab) and pinned apps.
+        SettingsTab(
+            id: SettingsTabID.apps, title: "Apps", icon: "square.grid.2x2.fill",
+            iconStyle: style(0x4ED98F, 0x12A85B, scale: 0.9)
         ),
         SettingsTab(
             id: SettingsTabID.appearance, title: "Appearance", icon: "paintbrush.fill",
@@ -241,10 +250,11 @@ enum SettingsCatalog {
         // Switcher · Actions
         item(SearchID.hoverActions, .switcher, SettingsAnchor.actions, "Switcher", "Hover actions",
              "Action buttons on hover", ["hover", "buttons", "close", "minimize", "maximize", "hide", "quit", "actions"]),
-        // Switcher · Apps
-        item(SearchID.excludedApps, .switcher, SettingsAnchor.apps, "Switcher", "Apps",
-             "Excluded apps", ["excluded", "exclude", "hide app", "blacklist"]),
-        item(SearchID.pinnedApps, .switcher, SettingsAnchor.apps, "Switcher", "Apps",
+        // Apps · App rules
+        item(SearchID.exceptions, .apps, SettingsAnchor.appRules, "Apps", "App rules",
+             "App rules", ["app rules", "exceptions", "excluded", "exclude", "hide app", "blacklist", "ignore shortcuts", "per-app", "fullscreen", "cmd tab"]),
+        // Apps · Pinned
+        item(SearchID.pinnedApps, .apps, SettingsAnchor.pinned, "Apps", "Pinned",
              "Pinned apps", ["pinned", "pin", "favorite", "always show"]),
 
         // Appearance
@@ -301,13 +311,14 @@ enum SettingsCatalog {
     }
 
     private enum TabRef {
-        case general, shortcuts, switcher, appearance, privacy, experimental
+        case general, shortcuts, switcher, apps, appearance, privacy, experimental
 
         var id: String {
             switch self {
             case .general: return SettingsTabID.general
             case .shortcuts: return SettingsTabID.shortcuts
             case .switcher: return SettingsTabID.switcher
+            case .apps: return SettingsTabID.apps
             case .appearance: return SettingsTabID.appearance
             case .privacy: return SettingsTabID.privacy
             case .experimental: return SettingsTabID.experimental

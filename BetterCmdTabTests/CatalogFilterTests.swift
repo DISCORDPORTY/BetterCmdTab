@@ -5,14 +5,14 @@ import Testing
 struct CatalogFilterTests {
 
     private func config(
-        excluded: Set<String> = [],
+        hideModes: [String: HideWindowsMode] = [:],
         pinned: [String] = [],
         showMinimized: Bool = true,
         showHidden: Bool = true,
         showWindowless: Bool = true,
         currentSpaceOnly: Bool = false
     ) -> CatalogFilter.Config {
-        CatalogFilter.Config(excluded: excluded, pinned: pinned, showMinimized: showMinimized, showHidden: showHidden, showWindowless: showWindowless, currentSpaceOnly: currentSpaceOnly)
+        CatalogFilter.Config(hideModes: hideModes, pinned: pinned, showMinimized: showMinimized, showHidden: showHidden, showWindowless: showWindowless, currentSpaceOnly: currentSpaceOnly)
     }
 
     // MARK: - isIdentity
@@ -20,7 +20,7 @@ struct CatalogFilterTests {
     @Test("identity config short-circuits filtering")
     func identity() {
         #expect(config().isIdentity)
-        #expect(!config(excluded: ["a"]).isIdentity)
+        #expect(!config(hideModes: ["a": .always]).isIdentity)
         #expect(!config(pinned: ["a"]).isIdentity)
         #expect(!config(showMinimized: false).isIdentity)
         #expect(!config(showHidden: false).isIdentity)
@@ -35,16 +35,33 @@ struct CatalogFilterTests {
         #expect(CatalogFilter.includes(bundleID: "com.x", isPlaceholder: false, isMinimized: true, appHidden: true, cfg))
     }
 
-    @Test("excluded bundle id is dropped")
-    func exclusion() {
-        let cfg = config(excluded: ["com.x"])
+    @Test("hide=always bundle id is dropped")
+    func hideAlways() {
+        let cfg = config(hideModes: ["com.x": .always])
         #expect(!CatalogFilter.includes(bundleID: "com.x", isPlaceholder: false, isMinimized: false, appHidden: false, cfg))
         #expect(CatalogFilter.includes(bundleID: "com.y", isPlaceholder: false, isMinimized: false, appHidden: false, cfg))
     }
 
-    @Test("placeholders are always kept, even when excluded")
+    @Test("hide=whenNoWindows drops only the windowless row")
+    func hideWhenNoWindows() {
+        let cfg = config(hideModes: ["com.x": .whenNoWindows])
+        // No window → dropped, even though the global windowless toggle is on.
+        #expect(!CatalogFilter.includes(bundleID: "com.x", isPlaceholder: false, isMinimized: false, appHidden: false, hasWindow: false, cfg))
+        // Has a window → kept.
+        #expect(CatalogFilter.includes(bundleID: "com.x", isPlaceholder: false, isMinimized: false, appHidden: false, hasWindow: true, cfg))
+    }
+
+    @Test("hide=dontHide is neutral — global toggles still apply")
+    func hideDontHide() {
+        // A dontHide exception adds no hiding, so the global minimized toggle wins.
+        let cfg = config(hideModes: ["com.x": .dontHide], showMinimized: false)
+        #expect(!CatalogFilter.includes(bundleID: "com.x", isPlaceholder: false, isMinimized: true, appHidden: false, cfg))
+        #expect(CatalogFilter.includes(bundleID: "com.x", isPlaceholder: false, isMinimized: false, appHidden: false, cfg))
+    }
+
+    @Test("placeholders are always kept, even when hidden")
     func placeholderKept() {
-        let cfg = config(excluded: ["com.x"], showMinimized: false, showHidden: false)
+        let cfg = config(hideModes: ["com.x": .always], showMinimized: false, showHidden: false)
         #expect(CatalogFilter.includes(bundleID: "com.x", isPlaceholder: true, isMinimized: true, appHidden: true, cfg))
     }
 

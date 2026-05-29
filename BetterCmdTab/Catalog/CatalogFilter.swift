@@ -1,7 +1,7 @@
 import AppKit
 
-/// Applies the user's catalog-filter preferences (excluded apps, pinned apps,
-/// minimized/hidden visibility) to produced switcher rows and app lists.
+/// Applies the user's catalog-filter preferences (per-app hide rules, pinned
+/// apps, minimized/hidden visibility) to produced switcher rows and app lists.
 ///
 /// `config()` is `nonisolated` and reads `UserDefaults` directly: the cold
 /// catalog paths (`AppCatalog.snapshot`, `AppCatalogCache.computeEntries`) run
@@ -10,7 +10,10 @@ import AppKit
 /// `Preferences.Keys` so the two never drift.
 enum CatalogFilter {
     struct Config: Sendable {
-        let excluded: Set<String>
+        /// Per-app hide override, keyed by bundle ID. Only entries that actually
+        /// hide something are stored — a `.dontHide` exception is neutral and
+        /// omitted, so an absent key means "apply the global toggles".
+        let hideModes: [String: HideWindowsMode]
         let pinned: [String]
         let showMinimized: Bool
         let showHidden: Bool
@@ -19,14 +22,22 @@ enum CatalogFilter {
 
         /// No filtering and no reordering — lets callers skip work entirely.
         var isIdentity: Bool {
-            excluded.isEmpty && pinned.isEmpty && showMinimized && showHidden && showWindowless && !currentSpaceOnly
+            hideModes.isEmpty && pinned.isEmpty && showMinimized && showHidden && showWindowless && !currentSpaceOnly
         }
     }
 
     nonisolated static func config() -> Config {
         let defaults = UserDefaults.standard
+        var hideModes: [String: HideWindowsMode] = [:]
+        if let raw = defaults.array(forKey: Preferences.Keys.appExceptions) as? [[String: String]] {
+            for entry in raw {
+                guard let bid = entry["bundleID"], !bid.isEmpty else { continue }
+                let mode = entry["hide"].flatMap(HideWindowsMode.init) ?? .dontHide
+                if mode != .dontHide { hideModes[bid] = mode }
+            }
+        }
         return Config(
-            excluded: Set(defaults.stringArray(forKey: Preferences.Keys.excludedBundleIDs) ?? []),
+            hideModes: hideModes,
             pinned: defaults.stringArray(forKey: Preferences.Keys.pinnedBundleIDs) ?? [],
             showMinimized: defaults.object(forKey: Preferences.Keys.showMinimizedWindows) as? Bool ?? true,
             showHidden: defaults.object(forKey: Preferences.Keys.showHiddenApps) as? Bool ?? true,
@@ -35,9 +46,9 @@ enum CatalogFilter {
         )
     }
 
-    /// Drop excluded apps and (optionally) minimized/hidden windows, then move
-    /// pinned apps to the front in pin order. Placeholders (cache-warm rows)
-    /// are never filtered or reordered.
+    /// Drop apps hidden by their exception and (optionally) minimized/hidden
+    /// windows, then move pinned apps to the front in pin order. Placeholders
+    /// (cache-warm rows) are never filtered or reordered.
     static func filteredRows(_ rows: [SwitcherRow], _ cfg: Config) -> [SwitcherRow] {
         if cfg.isIdentity { return rows }
         var filtered = rows.filter {
@@ -82,19 +93,27 @@ enum CatalogFilter {
     /// kept (transient cache-warm rows).
     static func includes(bundleID: String?, isPlaceholder: Bool, isMinimized: Bool, appHidden: Bool, hasWindow: Bool = true, _ cfg: Config) -> Bool {
         if isPlaceholder { return true }
-        if let bid = bundleID, cfg.excluded.contains(bid) { return false }
+        if let bid = bundleID, let mode = cfg.hideModes[bid] {
+            switch mode {
+            case .always: return false
+            case .whenNoWindows: if !hasWindow { return false }
+            case .dontHide: break
+            }
+        }
         if !cfg.showMinimized, isMinimized { return false }
         if !cfg.showHidden, appHidden { return false }
         if !cfg.showWindowless, !hasWindow { return false }
         return true
     }
 
-    /// Same exclusion + pin reordering for the primed app list (window state
-    /// doesn't apply at the app level, but hidden apps are still dropped).
+    /// Same hide + pin reordering for the primed app list. Window state isn't
+    /// known at the app level, so only `always`-hidden apps are dropped here
+    /// (the `whenNoWindows` rule is enforced on the full row list); hidden apps
+    /// are still dropped per the global toggle.
     static func filteredApps(_ apps: [NSRunningApplication], _ cfg: Config) -> [NSRunningApplication] {
         if cfg.isIdentity { return apps }
         let filtered = apps.filter { app in
-            if let bid = app.bundleIdentifier, cfg.excluded.contains(bid) { return false }
+            if let bid = app.bundleIdentifier, cfg.hideModes[bid] == .always { return false }
             if !cfg.showHidden, app.isHidden { return false }
             return true
         }

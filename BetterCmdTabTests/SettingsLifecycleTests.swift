@@ -29,6 +29,9 @@ struct SettingsLifecycleTests {
     @Test("Switcher tab controller deallocates when released")
     func switcher() { #expect(expectDeallocates { SwitcherSettingsViewController() }) }
 
+    @Test("Apps tab controller deallocates when released")
+    func apps() { #expect(expectDeallocates { AppsSettingsViewController() }) }
+
     @Test("Appearance tab controller deallocates when released")
     func appearance() { #expect(expectDeallocates { AppearanceSettingsViewController() }) }
 

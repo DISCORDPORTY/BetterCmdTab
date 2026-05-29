@@ -198,6 +198,19 @@ final class SwitcherController: SwitcherViewDelegate {
                 }
             }
         }
+        // Recompute the "Ignore shortcuts" suppression whenever the frontmost
+        // app changes or the active Space flips (the latter covers full-screen
+        // enter/exit, which is its own Space). The flag is read by the tap on
+        // the next trigger chord.
+        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.updateTriggerSuppression() }
+            }
+        }
     }
 
     private func handleAppHiddenChanged(pid: pid_t) {
@@ -359,6 +372,14 @@ final class SwitcherController: SwitcherViewDelegate {
             .sink { [weak self] enabled in self?.hotkey.setClickOutsideDismiss(enabled) }
             .store(in: &cancellables)
 
+        // "Ignore shortcuts" exceptions: seed the suppression flag for the
+        // current frontmost app and re-derive it when the exceptions change.
+        updateTriggerSuppression()
+        Preferences.shared.$appExceptions
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateTriggerSuppression() }
+            .store(in: &cancellables)
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.prewarmPanel()
         }
@@ -433,6 +454,42 @@ final class SwitcherController: SwitcherViewDelegate {
             windowKey: window.key
         ))
         syncNativeHotkeyOverride()
+    }
+
+    /// Push the current "Ignore shortcuts" decision for the frontmost app to the
+    /// tap. Cheap and only runs on frontmost/Space changes, so the per-keystroke
+    /// path stays a single lock read.
+    private func updateTriggerSuppression() {
+        let front = NSWorkspace.shared.frontmostApplication
+        guard let bid = front?.bundleIdentifier else {
+            hotkey.setSuppressTrigger(false)
+            return
+        }
+        let suppress: Bool
+        switch Preferences.shared.ignoreMode(for: bid) {
+        case .never: suppress = false
+        case .always: suppress = true
+        case .whenFullscreen: suppress = Self.focusedWindowIsFullscreen(pid: front?.processIdentifier ?? -1)
+        }
+        hotkey.setSuppressTrigger(suppress)
+    }
+
+    /// Whether the app's focused window is full screen, via the same AX
+    /// `AXFullScreen` attribute the window scan reads. A short messaging timeout
+    /// keeps a wedged app from stalling the main thread; any failure (no focused
+    /// window, attribute absent, timeout) reads as "not full screen".
+    private static func focusedWindowIsFullscreen(pid: pid_t) -> Bool {
+        guard pid > 0 else { return false }
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.25)
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focused) == .success,
+              let windowValue = focused,
+              CFGetTypeID(windowValue) == AXUIElementGetTypeID() else { return false }
+        let window = windowValue as! AXUIElement
+        var fullscreen: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &fullscreen) == .success else { return false }
+        return (fullscreen as? Bool) ?? false
     }
 
     /// Keep the secure-input fallback in sync with the configured trigger:

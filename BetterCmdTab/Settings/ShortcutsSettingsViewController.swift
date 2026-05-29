@@ -88,7 +88,8 @@ final class ShortcutsSettingsViewController: SettingsTabViewController {
             title: "Activate App",
             prompt: "Choose the app this shortcut focuses.",
             selectedBundleIDs: selected,
-            singleSelection: true
+            singleSelection: true,
+            confirmTitle: "Choose"
         ) { selection in
             var bindings = Preferences.shared.directActivationBindings
             while bindings.count <= slot { bindings.append("") }

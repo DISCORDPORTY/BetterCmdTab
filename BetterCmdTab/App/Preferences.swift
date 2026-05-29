@@ -5,9 +5,6 @@ import Foundation
 enum SwitcherLayoutMode: String, CaseIterable {
     case list
     case gridView = "iconDock"
-    /// alt-tab-style view: a wrapping grid of live window thumbnails. Needs the
-    /// Screen Recording permission to capture previews; falls back to the app
-    /// icon per tile when capture is unavailable.
     case windowPreview
 
     var displayName: String {
@@ -213,12 +210,88 @@ enum PanelSize: String, CaseIterable {
     }
 }
 
+/// Per-app override for whether the app's windows appear in the switcher.
+/// Lives on an `AppException`; an app with no exception uses the global
+/// Contents toggles unchanged.
+enum HideWindowsMode: String, CaseIterable, Sendable {
+    /// The exception adds no hiding — the global Contents toggles still apply.
+    /// (Default for a freshly added exception.)
+    case dontHide
+    /// Always hide this app from the switcher entirely (the old "Excluded apps").
+    case always
+    /// Hide this app only while it has no open windows (suppress its windowless
+    /// row) regardless of the global "show apps without windows" toggle.
+    case whenNoWindows
+
+    var displayName: String {
+        switch self {
+        case .dontHide: return "Don't hide"
+        case .always: return "Always"
+        case .whenNoWindows: return "When no open windows"
+        }
+    }
+}
+
+/// Per-app override for whether the switcher trigger (⌘Tab / ⌘`) is suppressed
+/// while this app is frontmost, letting the chord pass straight through to the
+/// app (e.g. a VM / remote-desktop window that wants its own ⌘Tab).
+enum IgnoreShortcutsMode: String, CaseIterable, Sendable {
+    /// The switcher trigger always works. (Default.)
+    case never
+    /// Pass the trigger chord through whenever this app is frontmost.
+    case always
+    /// Pass the trigger chord through only when this app is frontmost and its
+    /// focused window is full screen.
+    case whenFullscreen
+
+    var displayName: String {
+        switch self {
+        case .never: return "Never"
+        case .always: return "Always"
+        case .whenFullscreen: return "When fullscreen"
+        }
+    }
+}
+
+/// A per-app entry in the switcher's Exceptions list, identified by bundle ID.
+/// Carries the hide-windows and ignore-shortcuts overrides shown in the
+/// Exceptions editor. Persisted as a `[String: String]` dictionary so both the
+/// main-actor `Preferences` and the off-main `CatalogFilter` can read it.
+struct AppException: Equatable, Sendable {
+    var bundleID: String
+    var hide: HideWindowsMode
+    var ignore: IgnoreShortcutsMode
+
+    init(bundleID: String, hide: HideWindowsMode = .dontHide, ignore: IgnoreShortcutsMode = .never) {
+        self.bundleID = bundleID
+        self.hide = hide
+        self.ignore = ignore
+    }
+
+    /// Plist-friendly representation for UserDefaults.
+    var dictionary: [String: String] {
+        ["bundleID": bundleID, "hide": hide.rawValue, "ignore": ignore.rawValue]
+    }
+
+    /// Parse one stored dictionary. Missing/unknown modes fall back to the
+    /// neutral default so a half-written entry never silently drops the app.
+    init?(dictionary: [String: String]) {
+        guard let bid = dictionary["bundleID"], !bid.isEmpty else { return nil }
+        self.bundleID = bid
+        self.hide = dictionary["hide"].flatMap(HideWindowsMode.init) ?? .dontHide
+        self.ignore = dictionary["ignore"].flatMap(IgnoreShortcutsMode.init) ?? .never
+    }
+}
+
 @MainActor
 final class Preferences: ObservableObject {
     static let shared = Preferences()
 
     // Trigger keys are stored by the BetterShortcuts package
     // (see BetterShortcuts.Name.switchApps / .switchWindows), not here.
+
+    /// Seeded as a first-run App rule (show only with open windows).
+    static let finderBundleID = "com.apple.finder"
 
     static let defaultRevealDelayMs = 100
     static let revealDelayRange: ClosedRange<Int> = 40...500
@@ -243,7 +316,10 @@ final class Preferences: ObservableObject {
         static let revealDelayMs = "Switcher.revealDelayMs"
         static let panelSize = "Switcher.panelSize"
         static let gridMaxColumns = "Switcher.gridMaxColumns"
-        static let excludedBundleIDs = "Switcher.excludedBundleIDs"
+        static let appExceptions = "Switcher.appExceptions"
+        /// Pre-Exceptions key: a plain bundle-ID array of always-hidden apps.
+        /// Read once at launch and folded into `appExceptions` (hide = .always).
+        static let legacyExcludedBundleIDs = "Switcher.excludedBundleIDs"
         static let pinnedBundleIDs = "Switcher.pinnedBundleIDs"
         static let showMinimizedWindows = "Switcher.showMinimizedWindows"
         static let showHiddenApps = "Switcher.showHiddenApps"
@@ -323,12 +399,19 @@ final class Preferences: ObservableObject {
         }
     }
 
-    /// Bundle identifiers of apps hidden from the switcher entirely.
-    @Published var excludedBundleIDs: Set<String> {
+    /// Per-app overrides shown in the Exceptions editor (hide-windows +
+    /// ignore-shortcuts). Order is the editor's list order.
+    @Published var appExceptions: [AppException] {
         didSet {
-            guard oldValue != excludedBundleIDs else { return }
-            UserDefaults.standard.set(Array(excludedBundleIDs), forKey: Keys.excludedBundleIDs)
+            guard oldValue != appExceptions else { return }
+            UserDefaults.standard.set(appExceptions.map(\.dictionary), forKey: Keys.appExceptions)
         }
+    }
+
+    /// The ignore-shortcuts mode for `bundleID`, or `.never` when the app has no
+    /// exception. Used to decide whether to let the trigger chord pass through.
+    func ignoreMode(for bundleID: String) -> IgnoreShortcutsMode {
+        appExceptions.first { $0.bundleID == bundleID }?.ignore ?? .never
     }
 
     /// Bundle identifiers forced to the front of the switcher. Order is the
@@ -742,7 +825,22 @@ final class Preferences: ObservableObject {
 
         self.gridMaxColumns = defaults.object(forKey: Keys.gridMaxColumns) as? Int ?? 0
 
-        self.excludedBundleIDs = Set(defaults.stringArray(forKey: Keys.excludedBundleIDs) ?? [])
+        // Exceptions: honor the new key if present, otherwise build a first-run
+        // default — carry over the pre-Exceptions excluded-app list as hide=.always
+        // entries, and seed Finder to "show only with open windows". Persisted
+        // immediately because `CatalogFilter` reads the new key from UserDefaults
+        // off-main and never sees the legacy key.
+        if let stored = defaults.array(forKey: Keys.appExceptions) as? [[String: String]] {
+            self.appExceptions = stored.compactMap(AppException.init(dictionary:))
+        } else {
+            var initial = (defaults.stringArray(forKey: Keys.legacyExcludedBundleIDs) ?? [])
+                .map { AppException(bundleID: $0, hide: .always, ignore: .never) }
+            if !initial.contains(where: { $0.bundleID == Self.finderBundleID }) {
+                initial.append(AppException(bundleID: Self.finderBundleID, hide: .whenNoWindows, ignore: .never))
+            }
+            self.appExceptions = initial
+            defaults.set(initial.map(\.dictionary), forKey: Keys.appExceptions)
+        }
         self.pinnedBundleIDs = defaults.stringArray(forKey: Keys.pinnedBundleIDs) ?? []
         self.showMinimizedWindows = defaults.object(forKey: Keys.showMinimizedWindows) as? Bool ?? true
         self.showHiddenApps = defaults.object(forKey: Keys.showHiddenApps) as? Bool ?? true

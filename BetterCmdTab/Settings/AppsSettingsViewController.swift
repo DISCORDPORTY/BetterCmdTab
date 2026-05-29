@@ -1,0 +1,234 @@
+import AppKit
+import BetterSettings
+import Combine
+
+/// Settings tab gathering per-app configuration: the "App rules" list (hide /
+/// ⌘Tab overrides, one card row per app) and the pinned-apps list. Built from
+/// the same `SettingsSectionView` cards + rows as the rest of the app so it
+/// matches System Settings rather than looking like a raw table.
+@MainActor
+final class AppsSettingsViewController: SettingsTabViewController {
+
+    /// Working copy, persisted to `Preferences` on every mutation.
+    private var exceptions: [AppException] = Preferences.shared.appExceptions
+
+    /// Short, plain-language popup titles (kept compact for inline rows; the
+    /// row summary spells the choice out in full).
+    private let showOptions: [(mode: HideWindowsMode, title: String)] = [
+        (.dontHide, "Always"),
+        (.whenNoWindows, "With open windows"),
+        (.always, "Never"),
+    ]
+    private let shortcutOptions: [(mode: IgnoreShortcutsMode, title: String)] = [
+        (.never, "Never"),
+        (.always, "Always"),
+        (.whenFullscreen, "In full screen"),
+    ]
+
+    private let rulesCard = SettingsSectionView()
+
+    private let pinnedButton = NSButton(title: "Manage apps", target: nil, action: nil)
+    private var pinnedRow: SettingsRowView!
+    private var appsSheet: AppsPickerSheetWindowController?
+    private var addSheet: AppsPickerSheetWindowController?
+
+    private var cancellables = Set<AnyCancellable>()
+
+    override func setupContent() {
+        // App rules — a titled group (header + description) above a card whose
+        // rows are one app each, ending in an "Add App…" row.
+        let header = makeGroupHeader(
+            title: "App rules",
+            description: "Choose which apps appear in the switcher, and let some apps keep ⌘Tab for themselves."
+        )
+        let block = NSStackView(views: [header, rulesCard])
+        block.orientation = .vertical
+        block.alignment = .leading
+        block.spacing = 10
+        block.translatesAutoresizingMaskIntoConstraints = false
+        addArrangedSubview(block)
+        header.widthAnchor.constraint(equalTo: block.widthAnchor).isActive = true
+        rulesCard.widthAnchor.constraint(equalTo: block.widthAnchor).isActive = true
+        register(section: block, anchor: SettingsAnchor.appRules)
+        register(searchTarget: rulesCard, itemID: SearchID.exceptions)
+        rebuildRulesCard()
+
+        // Pinned apps — a lightweight chooser (a picker, not an editor).
+        let pinned = addSection(title: "Pinned", anchor: SettingsAnchor.pinned)
+        configureManageButton(pinnedButton, action: #selector(managePinned))
+        pinnedRow = addRow(to: pinned, title: "Pinned apps",
+                           subtitle: Self.pinnedDescription(Preferences.shared.pinnedBundleIDs.count),
+                           accessory: pinnedButton, searchItemID: SearchID.pinnedApps)
+    }
+
+    private func makeGroupHeader(title: String, description: String) -> NSView {
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 14, weight: .bold)
+        titleLabel.textColor = .labelColor
+
+        let descLabel = NSTextField(wrappingLabelWithString: description)
+        descLabel.font = .systemFont(ofSize: 11)
+        descLabel.textColor = .secondaryLabelColor
+        descLabel.maximumNumberOfLines = 0
+
+        let stack = NSStackView(views: [titleLabel, descLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 3
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
+        descLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -8).isActive = true
+        return stack
+    }
+
+    private func configureManageButton(_ button: NSButton, action: Selector) {
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.target = self
+        button.action = action
+    }
+
+    // MARK: - App rules card
+
+    private func rebuildRulesCard() {
+        let stack = rulesCard.contentStack
+        for sub in stack.arrangedSubviews {
+            stack.removeArrangedSubview(sub)
+            sub.removeFromSuperview()
+        }
+
+        if exceptions.isEmpty {
+            let empty = NSTextField(labelWithString: "No apps added yet.")
+            empty.font = .systemFont(ofSize: 12)
+            empty.textColor = .tertiaryLabelColor
+            rulesCard.addContent(empty)
+            rulesCard.addDivider()
+        } else {
+            for exception in exceptions {
+                rulesCard.addContent(makeRow(for: exception))
+                rulesCard.addDivider()
+            }
+        }
+
+        let addRow = AddAppRowView()
+        addRow.onClick = { [weak self] in self?.presentAddPicker() }
+        rulesCard.addContent(addRow)
+    }
+
+    private func makeRow(for exception: AppException) -> AppRuleRowView {
+        let info = Self.appInfo(for: exception.bundleID)
+        let row = AppRuleRowView(
+            bundleID: exception.bundleID,
+            name: info.name,
+            icon: info.icon,
+            hide: exception.hide,
+            ignore: exception.ignore,
+            showOptions: showOptions,
+            shortcutOptions: shortcutOptions
+        )
+        let bundleID = exception.bundleID
+        row.onChange = { [weak self] hide, ignore in
+            self?.updateRule(bundleID: bundleID, hide: hide, ignore: ignore)
+        }
+        row.onRemove = { [weak self] in
+            self?.removeRule(bundleID: bundleID)
+        }
+        return row
+    }
+
+    private func updateRule(bundleID: String, hide: HideWindowsMode, ignore: IgnoreShortcutsMode) {
+        guard let idx = exceptions.firstIndex(where: { $0.bundleID == bundleID }) else { return }
+        exceptions[idx].hide = hide
+        exceptions[idx].ignore = ignore
+        persist()
+    }
+
+    private func removeRule(bundleID: String) {
+        exceptions.removeAll { $0.bundleID == bundleID }
+        persist()
+        rebuildRulesCard()
+    }
+
+    private func persist() {
+        Preferences.shared.appExceptions = exceptions
+    }
+
+    private func presentAddPicker() {
+        guard let window = view.window, addSheet == nil else { return }
+        let controller = AppsPickerSheetWindowController(
+            title: "Add App",
+            prompt: "Choose an app to set switcher rules for.",
+            selectedBundleIDs: [],
+            singleSelection: true,
+            confirmTitle: "Add"
+        ) { [weak self] selection in
+            guard let self, let bundleID = selection.first else { return }
+            if !self.exceptions.contains(where: { $0.bundleID == bundleID }) {
+                self.exceptions.append(AppException(bundleID: bundleID))
+                self.persist()
+                self.rebuildRulesCard()
+            }
+        }
+        controller.onDidDismiss = { [weak self] in self?.addSheet = nil }
+        addSheet = controller
+        controller.present(asSheetFor: window)
+    }
+
+    // MARK: - Pinned
+
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        updatePinnedCount()
+        Preferences.shared.$pinnedBundleIDs
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.pinnedRow?.update(subtitle: Self.pinnedDescription($0.count)) }
+            .store(in: &cancellables)
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        cancellables.removeAll()
+    }
+
+    @objc private func managePinned() {
+        guard let window = view.window, appsSheet == nil else { return }
+        let controller = AppsPickerSheetWindowController(
+            title: "Pinned Apps",
+            prompt: "Selected apps are forced to the front of the switcher, before recents.",
+            selectedBundleIDs: Set(Preferences.shared.pinnedBundleIDs),
+            confirmTitle: "Done"
+        ) { selection in
+            // Preserve existing pin order; append newly-checked apps at the end.
+            let current = Preferences.shared.pinnedBundleIDs
+            var order = current.filter { selection.contains($0) }
+            for bid in selection where !order.contains(bid) { order.append(bid) }
+            Preferences.shared.pinnedBundleIDs = order
+        }
+        controller.onDidDismiss = { [weak self] in
+            self?.appsSheet = nil
+            self?.updatePinnedCount()
+        }
+        appsSheet = controller
+        controller.present(asSheetFor: window)
+    }
+
+    private func updatePinnedCount() {
+        pinnedRow?.update(subtitle: Self.pinnedDescription(Preferences.shared.pinnedBundleIDs.count))
+    }
+
+    private static func pinnedDescription(_ count: Int) -> String {
+        let prefix = count == 0 ? "None" : "\(count) app\(count == 1 ? "" : "s")"
+        return "\(prefix) — always shown first."
+    }
+
+    // MARK: - Helpers
+
+    /// Display name + icon for a bundle ID, resolved from the installed app.
+    private static func appInfo(for bundleID: String) -> (name: String, icon: NSImage) {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return (url.deletingPathExtension().lastPathComponent, NSWorkspace.shared.icon(forFile: url.path))
+        }
+        let fallback = NSImage(systemSymbolName: "app.dashed", accessibilityDescription: nil) ?? NSImage()
+        return (bundleID, fallback)
+    }
+}
