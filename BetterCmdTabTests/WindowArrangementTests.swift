@@ -67,7 +67,7 @@ struct WindowArrangementTests {
         #expect(WindowArrangement.center.cyclingSide == nil)
     }
 
-    // MARK: - Width cycle (½ → ⅓ → ⅔ → ½)
+    // MARK: - Width cycle (½ → ⅔ → ⅓ → ½)
 
     // Fractions are floating point (e.g. ⅓ ≈ 0.3333…), so compare with a small
     // tolerance rather than exact bit-equality.
@@ -84,13 +84,13 @@ struct WindowArrangementTests {
     }
 
     @MainActor
-    @Test("re-tiling the same window to the same side advances ½ → ⅓ → ⅔ → ½")
+    @Test("re-tiling the same window to the same side advances ½ → ⅔ → ⅓ → ½")
     func cyclerAdvances() {
         TileCycler.reset()
         let wid: CGWindowID = 42
         #expect(isClose(TileCycler.nextFraction(windowId: wid, side: .left), 1.0 / 2.0))
-        #expect(isClose(TileCycler.nextFraction(windowId: wid, side: .left), 1.0 / 3.0))
         #expect(isClose(TileCycler.nextFraction(windowId: wid, side: .left), 2.0 / 3.0))
+        #expect(isClose(TileCycler.nextFraction(windowId: wid, side: .left), 1.0 / 3.0))
         #expect(isClose(TileCycler.nextFraction(windowId: wid, side: .left), 1.0 / 2.0))
     }
 

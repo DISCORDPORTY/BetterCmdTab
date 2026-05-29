@@ -669,7 +669,7 @@ final class Preferences: ObservableObject {
     }
 
     /// When on, repeatedly pressing the tile-left / tile-right window-management
-    /// shortcut cycles the window through half → one-third → two-thirds width on
+    /// shortcut cycles the window through half → two-thirds → one-third width on
     /// that side instead of always snapping to half. Default off.
     @Published var cycleTileWidths: Bool {
         didSet {

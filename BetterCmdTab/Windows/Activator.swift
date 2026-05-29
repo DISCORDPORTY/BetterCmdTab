@@ -59,13 +59,13 @@ enum WindowArrangement {
         }
     }
 
-    // MARK: - Repeated-press width cycle (½ → ⅓ → ⅔)
+    // MARK: - Repeated-press width cycle (½ → ⅔ → ⅓)
 
     enum TileSide { case left, right }
 
     /// Width fractions a left/right tile steps through on repeated presses when
-    /// "cycle tile widths" is on: half → one-third → two-thirds → half…
-    static let widthCycle: [CGFloat] = [1.0 / 2.0, 1.0 / 3.0, 2.0 / 3.0]
+    /// "cycle tile widths" is on: half → two-thirds → one-third → half…
+    static let widthCycle: [CGFloat] = [1.0 / 2.0, 2.0 / 3.0, 1.0 / 3.0]
 
     /// Full-height tile flush to `side` at width `fraction` of the visible frame.
     static func tileFrame(side: TileSide, fraction: CGFloat, visibleFrame v: CGRect) -> CGRect {
@@ -76,7 +76,7 @@ enum WindowArrangement {
 
 }
 
-/// Tracks the repeated-press width cycle (½ → ⅓ → ⅔) per window so it advances
+/// Tracks the repeated-press width cycle (½ → ⅔ → ⅓) per window so it advances
 /// reliably on *every* window — including apps that don't honor an exact AX size
 /// write (min/max constraints, character-cell increments, fixed-height panels).
 /// Earlier logic re-derived the position from the window's resulting frame, so a
@@ -579,7 +579,7 @@ enum Activator {
         )
         guard let screen = screenContaining(rect: cocoaRect) else { return }
         let v = screen.visibleFrame
-        // Left/right halves width-cycle (½→⅓→⅔) on repeated presses when the
+        // Left/right halves width-cycle (½→⅔→⅓) on repeated presses when the
         // user enabled it; corners/maximize/center always use their fixed frame.
         // `applyArrangement` only runs inside `DispatchQueue.main.async`, so the
         // MainActor reads (pref + cycle state) are safe via `assumeIsolated`. The

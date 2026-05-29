@@ -126,7 +126,7 @@ final class ShortcutsSettingsViewController: SettingsTabViewController {
         addRow(
             to: windowMgmt,
             title: "Cycle tile widths",
-            subtitle: "Press Tile left / Tile right again to step the window through ½ → ⅓ → ⅔ of the screen on that side.",
+            subtitle: "Press Tile left / Tile right again to step the window through ½ → ⅔ → ⅓ of the screen on that side.",
             accessory: cycleWidthsSwitch
         )
     }
