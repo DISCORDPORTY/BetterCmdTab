@@ -288,13 +288,18 @@ final class AppCatalogCache {
     /// any run loop — the caller hops to main to install the source.
     nonisolated private static func buildAXObserver(pid: pid_t, refcon: UnsafeMutableRawPointer) -> AXObserver? {
         var observer: AXObserver?
-        let cb: AXObserverCallback = { _, element, _, refcon in
+        let cb: AXObserverCallback = { _, element, notification, refcon in
             guard let refcon else { return }
             let cache = Unmanaged<AppCatalogCache>.fromOpaque(refcon).takeUnretainedValue()
             var elemPid: pid_t = 0
             AXUIElementGetPid(element, &elemPid)
+            // A pure focus change reorders windows but never changes the window
+            // *set* — route it to a cheap MRU nudge instead of a full per-pid
+            // re-enumeration. Every set-changing notification (create/destroy/
+            // miniaturize/hide/...) still triggers the full scan.
+            let isFocus = CFEqual(notification, kAXFocusedWindowChangedNotification as CFString)
             DispatchQueue.main.async {
-                cache.scheduleBumpApp(pid: elemPid)
+                cache.handleAXNotification(pid: elemPid, isFocusChange: isFocus)
             }
         }
         let result = AXObserverCreate(pid, cb, &observer)
@@ -312,6 +317,21 @@ final class AppCatalogCache {
     private func uninstallAXObserver(forPid pid: pid_t) {
         guard let observer = axObservers.removeValue(forKey: pid) else { return }
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+    }
+
+    /// Set by `SwitcherController` to handle focus-change notifications without a
+    /// window re-scan (a focus change only reorders existing windows). Receives
+    /// the pid whose focused window changed.
+    var onFocusChanged: ((pid_t) -> Void)?
+
+    /// Dispatch an AX notification: focus changes take the cheap MRU path; every
+    /// other notification re-scans the pid's window set.
+    func handleAXNotification(pid: pid_t, isFocusChange: Bool) {
+        if isFocusChange {
+            onFocusChanged?(pid)
+        } else {
+            scheduleBumpApp(pid: pid)
+        }
     }
 
     /// Coalesces bump requests — an app-switch (deactivate + activate), an AX

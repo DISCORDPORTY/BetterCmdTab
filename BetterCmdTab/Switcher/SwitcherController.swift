@@ -238,6 +238,12 @@ final class SwitcherController: SwitcherViewDelegate {
         mru.start()
         windowMRU.start()
         cache.start(mru: mru)
+        // Focus changes don't change any app's window set, so the cache routes
+        // them here instead of paying a full per-pid AX re-scan: just nudge the
+        // per-app window-MRU so the next reveal orders windows correctly.
+        cache.onFocusChanged = { [weak self] pid in
+            self?.windowMRU.syncFrontWindow(pid: pid)
+        }
         RecentlyClosedStore.shared.start()
         let installed = hotkey.install()
         if !installed {
