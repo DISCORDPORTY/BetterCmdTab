@@ -9,6 +9,9 @@ final class AppCatalogCache {
     }
 
     private(set) var entries: [pid_t: AppCacheEntry] = [:]
+    /// Whether the switcher panel is on screen. Title-change notifications are
+    /// only acted on while this is true. Set via `setPanelVisible`.
+    private var panelVisible = false
     private var pendingRefresh = false
     private var pendingBumps: Set<pid_t> = []
     /// Per-pid serialization for `bumpApps`. `snapshotQueue` is concurrent, so
@@ -33,20 +36,19 @@ final class AppCatalogCache {
     /// changes that affect the switcher's *row set* (and their ordering):
     /// window add/remove, minimize/restore, focus change, hide/unhide.
     ///
-    /// `kAXTitleChangedNotification` is deliberately omitted: it's by far the
-    /// noisiest AX notification (browsers, terminals, editors fire it
-    /// constantly), yet every reveal already re-snapshots all titles via
-    /// `SwitcherController`'s `cache.scheduleFullRefresh()`. Keeping titles live
-    /// while the panel is hidden bought almost nothing but a steady background
-    /// `bumpApp` → window-scan churn; dropping it removes that idle CPU cost. A
-    /// reveal's first (synchronous, cached) paint may briefly show a slightly
-    /// stale title until the async refresh lands — self-correcting in ms.
+    /// `kAXTitleChangedNotification` is the noisiest AX notification (browsers,
+    /// terminals, editors fire it constantly), so it is handled specially: its
+    /// callback does nothing unless the panel is currently visible (see
+    /// `handleAXNotification`). That keeps titles live *while the user is looking
+    /// at the switcher* without the idle window-scan churn that made it not worth
+    /// subscribing to before — the gate, not the subscription, was the cost.
     nonisolated private static let axNotifications: [String] = [
         kAXWindowCreatedNotification as String,
         kAXUIElementDestroyedNotification as String,
         kAXWindowMiniaturizedNotification as String,
         kAXWindowDeminiaturizedNotification as String,
         kAXFocusedWindowChangedNotification as String,
+        kAXTitleChangedNotification as String,
         kAXApplicationHiddenNotification as String,
         kAXApplicationShownNotification as String,
     ]
@@ -59,9 +61,11 @@ final class AppCatalogCache {
     }
 
     func setPanelVisible(_ visible: Bool) {
-        // Kept for API compatibility. AXObserver model removed the periodic
-        // timer entirely — visibility no longer affects refresh cadence.
-        _ = visible
+        // Gates title-change handling: while the panel is hidden, title churn
+        // (browsers/terminals fire it constantly) is ignored, so there is no
+        // idle scan cost; while visible, titles are kept live (see
+        // `handleAXNotification` / `kAXTitleChangedNotification`).
+        panelVisible = visible
     }
 
     func rows(orderedBy mru: [pid_t]) -> [SwitcherRow] {
@@ -298,9 +302,16 @@ final class AppCatalogCache {
             // *set* — route it to a cheap MRU nudge instead of a full per-pid
             // re-enumeration. Every set-changing notification (create/destroy/
             // miniaturize/hide/...) still triggers the full scan.
-            let isFocus = CFEqual(notification, kAXFocusedWindowChangedNotification as CFString)
+            let kind: AXNoteKind
+            if CFEqual(notification, kAXFocusedWindowChangedNotification as CFString) {
+                kind = .focus
+            } else if CFEqual(notification, kAXTitleChangedNotification as CFString) {
+                kind = .title
+            } else {
+                kind = .set
+            }
             DispatchQueue.main.async {
-                cache.handleAXNotification(pid: elemPid, isFocusChange: isFocus)
+                cache.handleAXNotification(pid: elemPid, kind: kind)
             }
         }
         let result = AXObserverCreate(pid, cb, &observer)
@@ -320,17 +331,32 @@ final class AppCatalogCache {
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
     }
 
+    /// Classification of an AX notification by its effect on the switcher.
+    enum AXNoteKind {
+        case focus  // reorders windows only
+        case title  // changes a window's title only
+        case set    // adds/removes/min/hides a window — needs a re-scan
+    }
+
     /// Set by `SwitcherController` to handle focus-change notifications without a
     /// window re-scan (a focus change only reorders existing windows). Receives
     /// the pid whose focused window changed.
     var onFocusChanged: ((pid_t) -> Void)?
 
-    /// Dispatch an AX notification: focus changes take the cheap MRU path; every
-    /// other notification re-scans the pid's window set.
-    func handleAXNotification(pid: pid_t, isFocusChange: Bool) {
-        if isFocusChange {
+    /// Set by `SwitcherController`: a window title changed while the panel is
+    /// visible. Only fires when visible (titles don't matter when hidden), so the
+    /// switcher can refresh displayed titles without paying any idle cost.
+    var onVisibleTitleChanged: (() -> Void)?
+
+    /// Dispatch an AX notification by kind: focus → cheap MRU nudge; title →
+    /// notify the panel only while visible; everything else → full re-scan.
+    func handleAXNotification(pid: pid_t, kind: AXNoteKind) {
+        switch kind {
+        case .focus:
             onFocusChanged?(pid)
-        } else {
+        case .title:
+            if panelVisible { onVisibleTitleChanged?() }
+        case .set:
             scheduleBumpApp(pid: pid)
         }
     }

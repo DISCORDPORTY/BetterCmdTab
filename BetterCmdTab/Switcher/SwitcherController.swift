@@ -244,6 +244,12 @@ final class SwitcherController: SwitcherViewDelegate {
         cache.onFocusChanged = { [weak self] pid in
             self?.windowMRU.syncFrontWindow(pid: pid)
         }
+        // A window title changed while the switcher is open — refresh the
+        // displayed titles (debounced) so they stay live, e.g. a browser tab
+        // finishing load while the user scans rows.
+        cache.onVisibleTitleChanged = { [weak self] in
+            self?.scheduleVisibleTitleRefresh()
+        }
         RecentlyClosedStore.shared.start()
         let installed = hotkey.install()
         if !installed {
@@ -1082,6 +1088,28 @@ final class SwitcherController: SwitcherViewDelegate {
         baseRows = fresh
         baseLabels = RowLabels.labels(for: baseRows)
         refreshDisplay(anchorPid: anchorPid)
+    }
+
+    private var visibleTitleRefreshScheduled = false
+
+    /// Coalesce title-change notifications that arrive while the panel is open
+    /// into a single refresh after a short settle, so a burst (a page loading,
+    /// a terminal scrolling) costs one re-scan rather than dozens. Re-uses the
+    /// post-reveal refresh path, which preserves the user's current selection.
+    private func scheduleVisibleTitleRefresh() {
+        guard phase == .visible, !visibleTitleRefreshScheduled else { return }
+        visibleTitleRefreshScheduled = true
+        let gen = revealGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self else { return }
+            self.visibleTitleRefreshScheduled = false
+            guard self.phase == .visible, gen == self.revealGeneration else { return }
+            let anchor = self.rows.indices.contains(self.index) ? self.rows[self.index].pid : nil
+            self.cache.scheduleFullRefresh { [weak self] in
+                guard let self, gen == self.revealGeneration, self.phase == .visible else { return }
+                self.applyFullSnapshot(self.cache.rows(orderedBy: self.mru.order), anchorPid: anchor)
+            }
+        }
     }
 
     /// Select the window-switch target for a fast Cmd+` chord that commits
