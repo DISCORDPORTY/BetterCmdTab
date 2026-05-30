@@ -2154,8 +2154,24 @@ final class SwitcherController: SwitcherViewDelegate {
         // at the very end. Appending at the end made a recently-used app jump
         // twice: down to the bottom now, then back up to its MRU slot when the
         // refresh landed.
+        //
+        // Skip the demotion when the user's filter would hide the app once it's
+        // windowless — a per-app "hide when no windows" exception, or the global
+        // show-windowless toggle off. For those, vanishing the instant the last
+        // window closes is the *correct* behavior; the optimistic row bypasses
+        // `CatalogFilter` (it's set on `baseRows` directly, not via
+        // `cache.rows()`), so without this gate it would flash on screen until
+        // the 250ms refresh re-applied the filter and dropped it.
         if closedApp.activationPolicy == .regular,
-           !baseRows.contains(where: { $0.pid == closedPid }) {
+           !baseRows.contains(where: { $0.pid == closedPid }),
+           CatalogFilter.includes(
+               bundleID: closedApp.bundleIdentifier,
+               isPlaceholder: false,
+               isMinimized: false,
+               appHidden: closedApp.isHidden,
+               hasWindow: false,
+               CatalogFilter.config()
+           ) {
             baseRows.insert(
                 SwitcherRow(
                     app: closedApp,
