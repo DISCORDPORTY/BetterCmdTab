@@ -23,6 +23,7 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
     // Tabs
     private let tabDrillSwitch = NSSwitch()
     private let expandTabsSwitch = NSSwitch()
+    private let expandBrowserTabsSwitch = NSSwitch()
 
     // Search
     private let letterHintsSwitch = NSSwitch()
@@ -109,6 +110,10 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
         addRow(to: tabs, title: String(localized: "Show tabs as separate entries"),
                subtitle: String(localized: "List each tab of a native-tab window (Finder, Terminal, TextEdit, …) as its own row instead of one collapsed window. Off keeps one row per window — peek its tabs with \\."),
                accessory: expandTabsSwitch, searchItemID: SearchID.expandTabs)
+        configureSwitch(expandBrowserTabsSwitch, action: #selector(toggleExpandBrowserTabs(_:)))
+        addRow(to: tabs, title: String(localized: "Show browser tabs as separate entries"),
+               subtitle: String(localized: "List each tab of a browser window (Safari, Chrome, Arc, Brave, Edge, …) as its own row alongside the other windows, instead of one collapsed window. Needs Apple Events access (below); off keeps one row per window — peek its tabs with \\."),
+               accessory: expandBrowserTabsSwitch, searchItemID: SearchID.expandBrowserTabs)
 
         let grantButton = NSButton(title: String(localized: "Grant permissions…"), target: self, action: #selector(grantBrowserPermissions))
         grantButton.bezelStyle = .rounded
@@ -225,6 +230,7 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
         selectSortOrder(prefs.sortOrder)
         tabDrillSwitch.state = prefs.tabDrillEnabled ? .on : .off
         expandTabsSwitch.state = prefs.expandTabsAsWindows ? .on : .off
+        expandBrowserTabsSwitch.state = prefs.expandBrowserTabsAsWindows ? .on : .off
         letterHintsSwitch.state = prefs.letterHintsEnabled ? .on : .off
         applyLetterTimeout(prefs.letterChainTimeoutMs)
         letterTimeoutSlider.isEnabled = prefs.letterHintsEnabled
@@ -304,6 +310,14 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
 
     @objc private func toggleExpandTabs(_ sender: NSSwitch) {
         Preferences.shared.expandTabsAsWindows = (sender.state == .on)
+    }
+
+    @objc private func toggleExpandBrowserTabs(_ sender: NSSwitch) {
+        let on = (sender.state == .on)
+        Preferences.shared.expandBrowserTabsAsWindows = on
+        // Listing browser tabs needs Apple Events consent; opting in while
+        // Settings is foreground is the moment TCC can surface the prompt.
+        if on { BrowserTabs.requestPermissionForRunningBrowsers() }
     }
 
     @objc private func grantBrowserPermissions() {

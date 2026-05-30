@@ -3349,6 +3349,9 @@
         }
       }
     },
+    "List each tab of a browser window (Safari, Chrome, Arc, Brave, Edge, …) as its own row alongside the other windows, instead of one collapsed window. Needs Apple Events access (below); off keeps one row per window — peek its tabs with \\." : {
+
+    },
     "List each tab of a native-tab window (Finder, Terminal, TextEdit, …) as its own row instead of one collapsed window. Off keeps one row per window — peek its tabs with \\." : {
 
     },
@@ -5627,6 +5630,9 @@
           }
         }
       }
+    },
+    "Show browser tabs as separate entries" : {
+
     },
     "Show tabs as separate entries" : {
 

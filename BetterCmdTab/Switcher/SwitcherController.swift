@@ -128,6 +128,14 @@ final class SwitcherController: SwitcherViewDelegate {
     private var tabPrefetchCache: [AXRef: TabPrefetch] = [:]
     private var tabPrefetchInFlight: Set<AXRef> = []
     private var tabPrefetchTimer: Timer?
+    /// Inline browser-tab expansion (`expandBrowserTabsAsWindows`). Browser tabs
+    /// aren't separate NSWindows, so each browser window's tab titles are fetched
+    /// off-main via Apple Events and cached here, keyed by the parent window's AX
+    /// element. An empty array is a negative cache (no tabs / fetch failed) so the
+    /// window isn't re-scanned this session. Both are cleared when the panel
+    /// dismisses (titles are a per-session snapshot, like `tabPrefetchCache`).
+    private var browserTabsCache: [AXRef: [String]] = [:]
+    private var browserTabsFetchInFlight: Set<AXRef> = []
     private var windowsOnlyMode: Bool = false
     private var windowsOnlyPid: pid_t? = nil
     private var windowsOnlyPrimedDelta: Int = 0
@@ -1376,6 +1384,11 @@ final class SwitcherController: SwitcherViewDelegate {
         panel.present()
         phase = .visible
         cache.setPanelVisible(true)
+        // Inline browser-tab mode: start scanning the visible browser windows'
+        // tabs now so the rows expand as soon as Apple Events answers. Self-
+        // guards on the pref; a no-op on the cold (placeholder) branch since
+        // those rows carry no windows yet — the post-scan apply kicks it again.
+        scheduleBrowserTabExpansion()
 
         if hadCachedRows {
             // Cache already fresh — kick a background refresh through the cache
@@ -1499,9 +1512,13 @@ final class SwitcherController: SwitcherViewDelegate {
         // a Tab press landing between reveal-from-cache and this
         // background-refreshed apply isn't reverted to the originally-primed
         // app, falling back to `anchorPid` only if the row is gone.
-        baseRows = next
+        // Re-expand inline browser-tab rows from the (warm) per-session cache so a
+        // background refresh doesn't visibly collapse them back to one row; then
+        // scan any browser window that newly appeared.
+        baseRows = expandBrowserTabs(next)
         baseLabels = RowLabels.labels(for: baseRows)
         refreshDisplay(anchorPid: anchorPid)
+        scheduleBrowserTabExpansion()
     }
 
     /// pids with a focused-window resolve in flight, so a burst of focus-change
@@ -1573,6 +1590,91 @@ final class SwitcherController: SwitcherViewDelegate {
         }
     }
 
+    // MARK: - Inline browser-tab expansion
+
+    /// Replace each browser-family window row with one row per tab, using titles
+    /// already resolved in `browserTabsCache`. Rows whose tabs aren't cached yet
+    /// (or resolved to <2 tabs) stay collapsed until the background scan lands.
+    /// Already-expanded tab rows pass through untouched, so re-applying is
+    /// idempotent. No-op (returns the input) when the pref is off — pure, no AX.
+    private func expandBrowserTabs(_ source: [SwitcherRow]) -> [SwitcherRow] {
+        guard Preferences.shared.expandBrowserTabsAsWindows else { return source }
+        var out: [SwitcherRow] = []
+        out.reserveCapacity(source.count)
+        for row in source {
+            guard row.browserTab == nil,
+                  let window = row.window,
+                  BrowserTabs.Family.from(bundleID: row.bundleIdentifier) != nil,
+                  let titles = browserTabsCache[AXRef(element: window)],
+                  titles.count > 1 else { out.append(row); continue }
+            out.append(contentsOf: row.browserTabRows(tabTitles: titles))
+        }
+        return out
+    }
+
+    /// Kick a background Apple Events scan for every collapsed browser window in
+    /// `baseRows` whose tabs aren't cached yet, then splice the results in. Runs
+    /// off-main (each `BrowserTabs.tabTitles` is a blocking osascript round-trip)
+    /// and uses the name-match path (no raise) so listing tabs never reorders the
+    /// browser's windows. Windows with an empty/ambiguous title are skipped —
+    /// resolving them would need a raise, which the user would see as the panel
+    /// silently shuffling windows.
+    private func scheduleBrowserTabExpansion() {
+        guard Preferences.shared.expandBrowserTabsAsWindows, phase == .visible else { return }
+        struct Pending { let app: NSRunningApplication; let window: AXUIElement; let title: String; let key: AXRef }
+        var pending: [Pending] = []
+        for row in baseRows {
+            guard row.browserTab == nil,
+                  let window = row.window, let app = row.app,
+                  BrowserTabs.Family.from(bundleID: app.bundleIdentifier) != nil,
+                  !Self.isOwnProcess(app),
+                  !row.windowTitle.isEmpty else { continue }
+            let key = AXRef(element: window)
+            if browserTabsCache[key] != nil || browserTabsFetchInFlight.contains(key) { continue }
+            pending.append(Pending(app: app, window: window, title: row.windowTitle, key: key))
+        }
+        guard !pending.isEmpty else { return }
+        for p in pending { browserTabsFetchInFlight.insert(p.key) }
+        let gen = revealGeneration
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var fetched: [AXRef: [String]] = [:]
+            for p in pending {
+                switch BrowserTabs.tabTitles(for: p.app, window: p.window, title: p.title) {
+                case .tabs(let titles): fetched[p.key] = titles
+                // Negative-cache failures/unsupported so we don't re-spawn osascript
+                // for this window every refresh tick this session.
+                case .failed, .notSupported: fetched[p.key] = []
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self, gen == self.revealGeneration, self.phase == .visible else { return }
+                for (k, v) in fetched {
+                    self.browserTabsFetchInFlight.remove(k)
+                    self.browserTabsCache[k] = v
+                }
+                self.reExpandBrowserTabs()
+            }
+        }
+    }
+
+    /// Re-apply `expandBrowserTabs` to the current `baseRows` after a scan landed
+    /// and re-render. Skips the work when nothing actually expanded (every newly
+    /// scanned window had <2 tabs / failed), so a negative result is silent.
+    private func reExpandBrowserTabs() {
+        guard phase == .visible else { return }
+        let expanded = expandBrowserTabs(baseRows)
+        guard expanded.count != baseRows.count else { return }
+        baseRows = expanded
+        baseLabels = RowLabels.labels(for: baseRows)
+        refreshDisplay()
+    }
+
+    /// Drop the per-session browser-tab caches. Called whenever the panel ends.
+    private func clearBrowserTabExpansion() {
+        browserTabsCache.removeAll()
+        browserTabsFetchInFlight.removeAll()
+    }
+
     /// Select the window-switch target for a fast Cmd+` chord that commits
     /// while still in the primed phase (release of Cmd before the panel
     /// reveals). Mirrors the linear advance the visible phase would have
@@ -1629,9 +1731,23 @@ final class SwitcherController: SwitcherViewDelegate {
         case .visible:
             if rows.indices.contains(index) {
                 let row = rows[index]
-                if let pid = row.pid { mru.bump(pid) }
-                bumpWindowMRUIfPossible(for: row)
-                pendingActivation = { Activator.activate(row, instantSpace: instantSpace) }
+                if let bt = row.browserTab, let app = row.app, let window = row.window {
+                    // Inline browser-tab row: select the tab via Apple Events
+                    // (it isn't a real window). Bump the app MRU but not window
+                    // MRU — all of a window's tab rows share one cgWindowID.
+                    if let pid = row.pid { mru.bump(pid) }
+                    let tabIndex = bt.index
+                    let parentTitle = bt.parentTitle
+                    pendingActivation = {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            _ = BrowserTabs.activateTab(at: tabIndex, in: app, window: window, title: parentTitle)
+                        }
+                    }
+                } else {
+                    if let pid = row.pid { mru.bump(pid) }
+                    bumpWindowMRUIfPossible(for: row)
+                    pendingActivation = { Activator.activate(row, instantSpace: instantSpace) }
+                }
             }
         case .primed:
             if windowsOnlyMode, let pid = windowsOnlyPid,
@@ -1672,6 +1788,7 @@ final class SwitcherController: SwitcherViewDelegate {
         windowsOnlyPid = nil
         windowsOnlyPrimedDelta = 0
         closedTombstones.removeAll()
+        clearBrowserTabExpansion()
         // Drop any focused-window prefetch so it can't survive into the next
         // session and be adopted by a gesture/scoped open that skips the primed
         // prefetch (those call reveal() directly).
@@ -1712,6 +1829,7 @@ final class SwitcherController: SwitcherViewDelegate {
         tabPrefetchInFlight.removeAll()
         tabPrefetchTimer?.invalidate()
         tabPrefetchTimer = nil
+        clearBrowserTabExpansion()
         resetLetterBuffer()
         resetSearch()
         openFocusedWindow = nil
@@ -1811,6 +1929,9 @@ final class SwitcherController: SwitcherViewDelegate {
         guard Preferences.shared.tabDrillEnabled else { return }
         guard phase == .visible, rows.indices.contains(index) else { return }
         let row = rows[index]
+        // Already an inline browser-tab row — it *is* a tab, so there's nothing
+        // further to drill (its window is the parent browser window).
+        guard row.browserTab == nil else { return }
         guard let window = row.window, let app = row.app else { return }
         // Native macOS window tabs: the sibling tab windows + titles were already
         // resolved during the scan, so the strip appears instantly with no fetch.
@@ -2064,6 +2185,7 @@ final class SwitcherController: SwitcherViewDelegate {
         baseRows = []
         baseLabels = []
         closedTombstones.removeAll()
+        clearBrowserTabExpansion()
         resetLetterBuffer()
         resetSearch()
         view.releaseIdleResources()

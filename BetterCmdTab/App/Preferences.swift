@@ -413,6 +413,11 @@ final class Preferences: ObservableObject {
         /// one switcher row per tab instead of a single collapsed window row.
         /// Default off — the collapsed row + `\` peek is the default.
         static let expandTabsAsWindows = "Switcher.expandTabsAsWindows"
+        /// Expand a browser window (Safari/Chromium) into one switcher row per
+        /// tab, surfaced inline among the other windows. Default off — the
+        /// collapsed row + `\` peek is the default. Browser tabs aren't separate
+        /// NSWindows, so the rows are built from an async Apple Events tab scan.
+        static let expandBrowserTabsAsWindows = "Switcher.expandBrowserTabsAsWindows"
         static let showUnreadBadges = "Switcher.showUnreadBadges"
         /// Pre-graduation key (badges used to live behind the Experimental tab);
         /// read once at launch to carry a user's earlier choice over to the new key.
@@ -757,6 +762,18 @@ final class Preferences: ObservableObject {
         }
     }
 
+    /// Show each browser window's tabs (Safari, Chrome, Arc, Brave, Edge, …) as
+    /// their own switcher rows, inline among the other windows, instead of one
+    /// collapsed window row. Browser tabs aren't separate NSWindows — the rows
+    /// are filled in by an off-main Apple Events scan after the panel opens.
+    /// Default off; the collapsed row + `\` peek stays the default.
+    @Published var expandBrowserTabsAsWindows: Bool {
+        didSet {
+            guard oldValue != expandBrowserTabsAsWindows else { return }
+            UserDefaults.standard.set(expandBrowserTabsAsWindows, forKey: Keys.expandBrowserTabsAsWindows)
+        }
+    }
+
     /// Show app unread-badge counts (e.g. Mail's unread mail) on switcher rows,
     /// read from the Dock via the Accessibility API. On by default.
     @Published var showUnreadBadges: Bool {
@@ -1037,6 +1054,7 @@ final class Preferences: ObservableObject {
         self.experimentalInstantSpaceSwitch = defaults.object(forKey: Keys.experimentalInstantSpaceSwitch) as? Bool ?? false
         self.tabDrillEnabled = defaults.object(forKey: Keys.tabDrillEnabled) as? Bool ?? true
         self.expandTabsAsWindows = defaults.object(forKey: Keys.expandTabsAsWindows) as? Bool ?? false
+        self.expandBrowserTabsAsWindows = defaults.object(forKey: Keys.expandBrowserTabsAsWindows) as? Bool ?? false
         // Badges graduated out of the Experimental tab and now default on. Honor
         // the new key if present, otherwise carry over a choice made under the
         // old experimental key, otherwise default to on.
@@ -1120,6 +1138,7 @@ final class Preferences: ObservableObject {
         experimentalInstantSpaceSwitch = defaults.object(forKey: Keys.experimentalInstantSpaceSwitch) as? Bool ?? false
         tabDrillEnabled = defaults.object(forKey: Keys.tabDrillEnabled) as? Bool ?? true
         expandTabsAsWindows = defaults.object(forKey: Keys.expandTabsAsWindows) as? Bool ?? false
+        expandBrowserTabsAsWindows = defaults.object(forKey: Keys.expandBrowserTabsAsWindows) as? Bool ?? false
         showUnreadBadges = defaults.object(forKey: Keys.showUnreadBadges) as? Bool ?? true
 
         showWindowTitleLabel = defaults.object(forKey: Keys.showWindowTitleLabel) as? Bool ?? true

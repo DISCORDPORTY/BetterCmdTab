@@ -83,6 +83,7 @@ enum SearchID {
     static let recentlyClosedLimit = "switcher.recentlyClosedLimit"
     static let tabDrill = "switcher.tabDrill"
     static let expandTabs = "switcher.expandTabs"
+    static let expandBrowserTabs = "switcher.expandBrowserTabs"
     static let tabPermissions = "switcher.tabPermissions"
     static let letterHints = "switcher.letterHints"
     static let fuzzy = "switcher.fuzzy"
@@ -264,6 +265,8 @@ enum SettingsCatalog {
              String(localized: "Peek tabs with \\"), ["tabs", "tab", "drill", "peek", "backslash", "finder tabs", "browser tabs", "safari", "chrome"]),
         item(SearchID.expandTabs, .switcher, SettingsAnchor.tabs, "Switcher", "Tabs",
              String(localized: "Show tabs as separate entries"), ["tabs", "tab", "expand", "separate", "rows", "per tab", "finder", "terminal", "native tabs"]),
+        item(SearchID.expandBrowserTabs, .switcher, SettingsAnchor.tabs, "Switcher", "Tabs",
+             String(localized: "Show browser tabs as separate entries"), ["tabs", "tab", "browser", "expand", "separate", "rows", "per tab", "safari", "chrome", "arc", "brave", "edge"]),
         item(SearchID.tabPermissions, .switcher, SettingsAnchor.tabs, "Switcher", "Tabs",
              String(localized: "Browser tab access"), ["tabs", "apple events", "automation", "permission", "browser", "consent"]),
         // Switcher · Search

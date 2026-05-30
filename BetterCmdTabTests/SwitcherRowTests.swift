@@ -123,4 +123,46 @@ struct SwitcherRowTests {
         #expect(row.tabWindows.isEmpty)
         #expect(!row.hasTabs)
     }
+
+    // MARK: - inline browser-tab rows
+
+    private func browserWindowRow(title: String) -> SwitcherRow {
+        SwitcherRow(app: hostApp, window: axElement(), windowTitle: title, isMinimized: false, cgWindowID: 99)
+    }
+
+    @Test("browserTabRows yields one row per tab, indexed in order")
+    func browserTabsExpandPerTab() {
+        let parent = browserWindowRow(title: "Browser Window")
+        let rows = parent.browserTabRows(tabTitles: ["Inbox", "Docs", "News"])
+        #expect(rows.count == 3)
+        #expect(rows.map(\.browserTab?.index) == [0, 1, 2])
+        // Each tab row shows its tab title, points at the parent window's id, and
+        // carries the parent window's title for AppleScript resolution.
+        #expect(rows.map(\.displayTitle) == ["Inbox", "Docs", "News"])
+        #expect(rows.allSatisfy { $0.cgWindowID == 99 })
+        #expect(rows.allSatisfy { $0.browserTab?.parentTitle == "Browser Window" })
+        #expect(rows.allSatisfy { $0.window != nil })
+    }
+
+    @Test("browserTabRows leaves a single-tab (or empty) window collapsed")
+    func browserTabsNoExpandUnderTwo() {
+        let parent = browserWindowRow(title: "Solo")
+        #expect(parent.browserTabRows(tabTitles: ["Only"]).count == 1)
+        #expect(parent.browserTabRows(tabTitles: []).count == 1)
+        // Unchanged row keeps its collapsed identity (no browserTab marker).
+        #expect(parent.browserTabRows(tabTitles: ["Only"]).first?.browserTab == nil)
+    }
+
+    @Test("browserTabRows is a no-op for a non-running subject")
+    func browserTabsNoExpandLaunchable() {
+        let installed = InstalledApp(
+            name: "Browser",
+            bundleID: "com.example.browser",
+            url: URL(fileURLWithPath: "/Applications/Browser.app")
+        )
+        let row = SwitcherRow(launchable: installed)
+        let out = row.browserTabRows(tabTitles: ["A", "B"])
+        #expect(out.count == 1)
+        #expect(out.first?.browserTab == nil)
+    }
 }

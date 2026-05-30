@@ -1,6 +1,15 @@
 import AppKit
 import ApplicationServices
 
+/// Identifies one tab within a browser window for an inline browser-tab row.
+/// `index` is the tab's 0-based position; `parentTitle` is the parent window's
+/// AX title, used to resolve the AppleScript `window N` on commit without a
+/// raise (matching `BrowserTabs.tabTitles`/`activateTab`'s name-match path).
+struct BrowserTabRef {
+    let index: Int
+    let parentTitle: String
+}
+
 struct SwitcherRow {
     /// What a row stands for. Most rows are a running app/window; search mode
     /// can also surface not-yet-running apps (`.launchable`) so they can be
@@ -37,6 +46,14 @@ struct SwitcherRow {
     /// the tab). Empty for ordinary windows and in "expand tabs as windows" mode
     /// (each tab is then its own row).
     let tabWindows: [TabWindowRef]
+    /// Non-nil when this row stands for a single browser tab (Safari/Chromium)
+    /// surfaced inline among windows — the "expand browser tabs as windows"
+    /// mode. `window`/`cgWindowID` point at the *parent* browser window;
+    /// `browserTab.index` is the tab's 0-based position and `browserTab.parentTitle`
+    /// is the parent window's AX title, used to resolve the AppleScript window on
+    /// commit without a raise. Browser tabs aren't separate NSWindows, so there's
+    /// no per-tab AX element — activation goes through `BrowserTabs.activateTab`.
+    let browserTab: BrowserTabRef?
 
     init(
         app: NSRunningApplication,
@@ -48,7 +65,8 @@ struct SwitcherRow {
         suppressNoWindowGlyph: Bool = false,
         tabs: [AXUIElement] = [],
         tabWindows: [TabWindowRef] = [],
-        cgWindowID: CGWindowID = 0
+        cgWindowID: CGWindowID = 0,
+        browserTab: BrowserTabRef? = nil
     ) {
         self.subject = .running(app)
         self.window = window
@@ -60,6 +78,7 @@ struct SwitcherRow {
         self.suppressNoWindowGlyph = suppressNoWindowGlyph
         self.tabs = tabs
         self.tabWindows = tabWindows
+        self.browserTab = browserTab
     }
 
     /// Map one enumerated window to its switcher row, carrying its native
@@ -91,6 +110,7 @@ struct SwitcherRow {
         self.suppressNoWindowGlyph = false
         self.tabs = []
         self.tabWindows = []
+        self.browserTab = nil
     }
 
     /// A recently closed window/app surfaced in search so it can be reopened.
@@ -105,6 +125,7 @@ struct SwitcherRow {
         self.suppressNoWindowGlyph = false
         self.tabs = []
         self.tabWindows = []
+        self.browserTab = nil
     }
 
     /// A copy of this row with an updated window title, used for in-place title
@@ -122,8 +143,30 @@ struct SwitcherRow {
             suppressNoWindowGlyph: suppressNoWindowGlyph,
             tabs: tabs,
             tabWindows: tabWindows,
-            cgWindowID: cgWindowID
+            cgWindowID: cgWindowID,
+            browserTab: browserTab
         )
+    }
+
+    /// Expand this collapsed browser-window row into one row per tab. Each output
+    /// row shows a tab's title and carries its 0-based index plus this window's
+    /// title (`parentTitle`) so commit can resolve the AppleScript window without
+    /// a raise. Fewer than 2 titles, a non-running subject, or no window → just
+    /// this row (nothing to expand). Pure — no AX messaging.
+    func browserTabRows(tabTitles: [String]) -> [SwitcherRow] {
+        guard case .running(let app) = subject, window != nil, tabTitles.count > 1 else { return [self] }
+        let parentTitle = windowTitle
+        return tabTitles.enumerated().map { i, title in
+            SwitcherRow(
+                app: app,
+                window: window,
+                windowTitle: title,
+                isMinimized: isMinimized,
+                isFullscreen: isFullscreen,
+                cgWindowID: cgWindowID,
+                browserTab: BrowserTabRef(index: i, parentTitle: parentTitle)
+            )
+        }
     }
 
     /// True when this row has a tab group worth peeking with `\` — either native
