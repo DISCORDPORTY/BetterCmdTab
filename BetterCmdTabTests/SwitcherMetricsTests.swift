@@ -73,3 +73,60 @@ struct SwitcherMetricsTests {
         #expect(SwitcherMetrics.forScreen(nil) == SwitcherMetrics.forScreen(nil, userScale: 1.0))
     }
 }
+
+@Suite("Switcher grid/preview column fitting")
+struct SwitcherFitColumnsTests {
+
+    @Test("stays at the preferred columns when the rows already fit the height")
+    func fitsWithoutExpansion() {
+        // 12 tiles, 6 preferred cols → 2 rows, well under the 5-row cap.
+        #expect(SwitcherView.fitColumns(count: 12, preferredCols: 6, tilesPerRow: 10, maxRows: 5) == 6)
+        // A user's smaller column choice is honored when it doesn't overflow.
+        #expect(SwitcherView.fitColumns(count: 8, preferredCols: 4, tilesPerRow: 10, maxRows: 4) == 4)
+    }
+
+    @Test("adds columns past the preferred count to keep rows within the height")
+    func expandsToFitHeight() {
+        // 40 tiles, 4 preferred cols → 10 rows > 5 cap → needs ceil(40/5)=8 cols.
+        #expect(SwitcherView.fitColumns(count: 40, preferredCols: 4, tilesPerRow: 10, maxRows: 5) == 8)
+        // After expansion the rows actually fit.
+        let cols = SwitcherView.fitColumns(count: 20, preferredCols: 2, tilesPerRow: 10, maxRows: 4)
+        #expect(cols == 5)
+        #expect(Int(ceil(Double(20) / Double(cols))) <= 4)
+    }
+
+    @Test("never exceeds the width-driven column maximum (extreme counts)")
+    func cappedByWidth() {
+        // 100 tiles want ceil(100/5)=20 cols, but only 6 fit horizontally.
+        #expect(SwitcherView.fitColumns(count: 100, preferredCols: 4, tilesPerRow: 6, maxRows: 5) == 6)
+    }
+
+    @Test("clamps a preferred column count above what the width holds")
+    func preferredAboveWidth() {
+        // preferredCols 12 but width holds only 6; rows then fit → 6.
+        #expect(SwitcherView.fitColumns(count: 10, preferredCols: 12, tilesPerRow: 6, maxRows: 10) == 6)
+    }
+
+    @Test("gridFit expands columns past a user cap to keep rows within the height")
+    func gridFitExpandsPastCap() {
+        // tileW 100 + gap 10 → 8 cols fit the 870-wide area; itemH 100 + gap 10 →
+        // 2 rows fit the 250-tall area. User cap 2 would need 6 rows (overflow),
+        // so columns expand from 2 → 6 to land 12 tiles in 2 rows.
+        let f = SwitcherView.gridFit(count: 12, tileW: 100, itemH: 100, gap: 10,
+                                     maxListWidth: 870, maxListHeight: 250, userCap: 2)
+        #expect(f.cols == 6)
+        #expect(f.rowsCount == 2)
+        #expect(f.listHeight <= 250)   // fits the visible height after expansion
+    }
+
+    @Test("gridFit never exceeds the width-driven column max (shrink-to-fit handles the rest)")
+    func gridFitWidthCapped() {
+        // 100 tiles want 50 cols to fit 2 rows, but only 5 fit the 540-wide area,
+        // so cols cap at 5 and the rows overflow here — the configure-time fit
+        // scale then shrinks the tiles. gridFit just reports the packing.
+        let f = SwitcherView.gridFit(count: 100, tileW: 100, itemH: 100, gap: 10,
+                                     maxListWidth: 540, maxListHeight: 250, userCap: 0)
+        #expect(f.cols == 5)
+        #expect(f.rowsCount == 20)
+    }
+}

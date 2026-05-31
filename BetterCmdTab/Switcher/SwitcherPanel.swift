@@ -128,9 +128,18 @@ final class SwitcherPanel: NSPanel {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         content.layoutSubtreeIfNeeded()
-        let size = content.fittingSize
+        let fitting = content.fittingSize
         let screen = activeScreen()
         let visible = screen.visibleFrame
+        // Hard safety: never let the panel extend past the visible frame, even if
+        // an extreme app/window count makes the content larger than the screen.
+        // The grid/preview layouts add columns to avoid this, but clamp here as a
+        // backstop so the window stays on-screen rather than spilling off the top
+        // and bottom.
+        let size = NSSize(
+            width: min(fitting.width, visible.width),
+            height: min(fitting.height, visible.height)
+        )
         let origin = NSPoint(
             x: visible.midX - size.width / 2,
             y: visible.midY - size.height / 2

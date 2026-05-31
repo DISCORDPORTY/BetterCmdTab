@@ -118,6 +118,11 @@ final class SwitcherView: NSView, TabStripDelegate {
         // resize. The item views still reconfigure below and relayout themselves
         // if their own content changed.
         let stripActiveNew = (tabStripTitles?.isEmpty == false)
+        // Shrink grid/preview tiles to fit the screen for large app/window counts
+        // so they stay fully visible instead of overflowing top/bottom. Shadows
+        // the incoming `metrics` so every downstream sizing path (layout math and
+        // the item views, which read the stored metrics) uses the fitted scale.
+        let metrics = fittedMetrics(metrics, count: rows.count, searchActive: searchActive, tabActive: stripActiveNew)
         let geometryChanged =
             rows.count != self.rows.count ||
             metrics != self.metrics ||
@@ -511,6 +516,54 @@ final class SwitcherView: NSView, TabStripDelegate {
         let cols: Int
     }
 
+    /// For the grid / window-preview layouts, shrink the tile scale just enough
+    /// that `count` tiles fit within the visible height once columns have been
+    /// expanded to the width limit — so a large app/window count stays fully on
+    /// screen instead of overflowing (or being clipped) top and bottom. Returns
+    /// `base` unchanged for the list layout (it bounds itself via columns) and
+    /// whenever the content already fits. Floored so tiles never get microscopic;
+    /// counts beyond even the floor's capacity fall back to the panel's
+    /// visible-frame clamp in `SwitcherPanel.present()`.
+    private func fittedMetrics(_ base: SwitcherMetrics, count: Int, searchActive: Bool, tabActive: Bool) -> SwitcherMetrics {
+        guard base.layoutMode == .gridView || base.layoutMode == .windowPreview else { return base }
+        let frame = layoutScreenFrame()
+        let letterHints = base.tileLetterArea > 0
+        let userCap = Preferences.shared.gridMaxColumns
+
+        func fits(_ m: SwitcherMetrics) -> Bool {
+            let reservedSearch = searchActive ? round(30 * m.scale) + m.outerPadding : 0
+            let reservedTab = tabActive ? TabStripView.stripHeight + m.outerPadding : 0
+            let maxW = frame.width * maxScreenWidthFraction - m.outerPadding * 2
+            let maxH = frame.height * maxScreenHeightFraction - m.outerPadding * 2 - reservedSearch - reservedTab
+            let tileW: CGFloat, itemH: CGFloat, gap: CGFloat
+            if m.layoutMode == .windowPreview {
+                tileW = m.previewTileWidth
+                itemH = m.previewLetterArea + m.previewThumbHeight + m.previewLabelArea
+                gap = m.previewGap
+            } else {
+                tileW = m.tileSize
+                itemH = m.tileLetterArea + m.tileSize + m.tileLabelArea
+                gap = m.tileGap
+            }
+            let fit = Self.gridFit(count: count, tileW: tileW, itemH: itemH, gap: gap,
+                                   maxListWidth: maxW, maxListHeight: maxH, userCap: userCap)
+            return fit.listHeight <= maxH
+        }
+
+        if fits(base) { return base }
+        // Shrink in small steps until it fits or we hit the floor (half the base
+        // scale, and never below 0.5) — past that the clamp handles the residual.
+        let minScale = max(0.5, base.scale * 0.5)
+        var scale = base.scale
+        var candidate = base
+        while scale > minScale + 0.001 {
+            scale = max(minScale, scale - 0.05)
+            candidate = SwitcherMetrics.forScale(scale, layoutMode: base.layoutMode, letterHints: letterHints)
+            if fits(candidate) { return candidate }
+        }
+        return candidate
+    }
+
     private func computeLayout() -> ListLayout {
         if let cachedLayout { return cachedLayout }
         let layout: ListLayout
@@ -535,6 +588,38 @@ final class SwitcherView: NSView, TabStripDelegate {
     private func layoutScreenFrame() -> NSRect {
         let screen = window?.screen ?? SwitcherPanel.preferredScreen()
         return screen.visibleFrame
+    }
+
+    /// Pick a column count that keeps `count` tiles within the visible height
+    /// when the width allows it. `preferredCols` is the width-driven or
+    /// user-capped starting point; columns are only ADDED past it (never below,
+    /// never beyond `tilesPerRow`) when the rows would otherwise overflow
+    /// `maxRows`. The grid/preview analogue of the list layout's height-bounded
+    /// multi-column wrapping — without it the grid and preview layouts run off
+    /// the top and bottom of the screen with many apps/windows.
+    nonisolated static func fitColumns(count: Int, preferredCols: Int, tilesPerRow: Int, maxRows: Int) -> Int {
+        let base = max(1, min(preferredCols, tilesPerRow))
+        let rows = Int(ceil(Double(count) / Double(base)))
+        guard rows > maxRows else { return base }
+        let neededByHeight = Int(ceil(Double(count) / Double(max(1, maxRows))))
+        return max(base, min(tilesPerRow, neededByHeight))
+    }
+
+    /// Shared column/row packing for the grid and window-preview layouts: width-
+    /// driven (or user-capped) columns, expanded to keep rows within the visible
+    /// height when the width allows, plus the resulting content size. When even
+    /// the max-width columns can't fit the height (extreme counts) the rows
+    /// overflow here, and the configure-time fit-scale shrinks the tiles instead.
+    nonisolated static func gridFit(count: Int, tileW: CGFloat, itemH: CGFloat, gap: CGFloat, maxListWidth: CGFloat, maxListHeight: CGFloat, userCap: Int) -> (cols: Int, rowsCount: Int, listWidth: CGFloat, listHeight: CGFloat) {
+        let perTileStride = tileW + gap
+        let tilesPerRow = max(1, Int(floor((maxListWidth + gap) / perTileStride)))
+        let maxRowsByHeight = max(1, Int(floor((maxListHeight + gap) / (itemH + gap))))
+        let preferred = userCap > 0 ? min(count, tilesPerRow, userCap) : min(count, tilesPerRow)
+        let cols = fitColumns(count: count, preferredCols: preferred, tilesPerRow: tilesPerRow, maxRows: maxRowsByHeight)
+        let rowsCount = max(1, Int(ceil(Double(count) / Double(cols))))
+        let listWidth = CGFloat(cols) * tileW + CGFloat(max(0, cols - 1)) * gap
+        let listHeight = CGFloat(rowsCount) * itemH + CGFloat(max(0, rowsCount - 1)) * gap
+        return (cols, rowsCount, listWidth, listHeight)
     }
 
     private func computeListLayout() -> ListLayout {
@@ -611,19 +696,18 @@ final class SwitcherView: NSView, TabStripDelegate {
 
         let screen = layoutScreenFrame()
         let maxListWidth = screen.width * maxScreenWidthFraction - outerPadding * 2
-
-        // Each tile occupies (tile + gap), final tile has no trailing gap.
-        let perTileStride = tile + gap
-        let tilesPerRow = max(1, Int(floor((maxListWidth + gap) / perTileStride)))
-        // User cap (0 = automatic, width-driven).
-        let userCap = Preferences.shared.gridMaxColumns
-        let cols = userCap > 0 ? min(count, tilesPerRow, userCap) : min(count, tilesPerRow)
-        let rowsCount = max(1, Int(ceil(Double(count) / Double(cols))))
+        let maxListHeight = screen.height * maxScreenHeightFraction - outerPadding * 2
+            - reservedSearchHeight - reservedTabStripHeight
 
         // Tile stacks: letter strip (top) + icon + text labels (bottom).
         let itemH = letterArea + tile + labelArea
-        let listWidth = CGFloat(cols) * tile + CGFloat(max(0, cols - 1)) * gap
-        let listHeight = CGFloat(rowsCount) * itemH + CGFloat(max(0, rowsCount - 1)) * gap
+        let fit = Self.gridFit(count: count, tileW: tile, itemH: itemH, gap: gap,
+                               maxListWidth: maxListWidth, maxListHeight: maxListHeight,
+                               userCap: Preferences.shared.gridMaxColumns)
+        let cols = fit.cols
+        let rowsCount = fit.rowsCount
+        let listWidth = fit.listWidth
+        let listHeight = fit.listHeight
 
         var frames: [NSRect] = []
         frames.reserveCapacity(rows.count)
@@ -670,27 +754,19 @@ final class SwitcherView: NSView, TabStripDelegate {
         let screen = layoutScreenFrame()
         let maxListWidth = screen.width * maxScreenWidthFraction - outerPadding * 2
         let maxListHeight = screen.height * maxScreenHeightFraction - outerPadding * 2
+            - reservedSearchHeight - reservedTabStripHeight
 
-        let perTileStride = tileW + gap
-        let tilesPerRow = max(1, Int(floor((maxListWidth + gap) / perTileStride)))
-        let userCap = Preferences.shared.gridMaxColumns
-        let cols: Int
-        if userCap > 0 {
-            // Explicit column count — honor it even if the rows then overflow.
-            cols = min(count, tilesPerRow, userCap)
-        } else {
-            // Preview tiles are tall, so width-only wrapping overflows the screen
-            // height well before the width. Add columns as needed to keep the
-            // rows within the visible height, never exceeding what the width can
-            // hold (extreme window counts still overflow — same as Grid view).
-            let maxRows = max(1, Int(floor((maxListHeight + gap) / (itemH + gap))))
-            let neededByHeight = Int(ceil(Double(count) / Double(maxRows)))
-            cols = max(1, min(tilesPerRow, max(min(count, tilesPerRow), neededByHeight)))
-        }
-        let rowsCount = max(1, Int(ceil(Double(count) / Double(cols))))
-
-        let listWidth = CGFloat(cols) * tileW + CGFloat(max(0, cols - 1)) * gap
-        let listHeight = CGFloat(rowsCount) * itemH + CGFloat(max(0, rowsCount - 1)) * gap
+        // Preview tiles are tall, so width-only wrapping overflows the screen
+        // height well before the width. `gridFit` adds columns to keep rows within
+        // the visible height; the configure-time fit-scale shrinks the tiles when
+        // even max-width columns can't fit (both auto and explicit-column-cap).
+        let fit = Self.gridFit(count: count, tileW: tileW, itemH: itemH, gap: gap,
+                               maxListWidth: maxListWidth, maxListHeight: maxListHeight,
+                               userCap: Preferences.shared.gridMaxColumns)
+        let cols = fit.cols
+        let rowsCount = fit.rowsCount
+        let listWidth = fit.listWidth
+        let listHeight = fit.listHeight
 
         var frames: [NSRect] = []
         frames.reserveCapacity(rows.count)
