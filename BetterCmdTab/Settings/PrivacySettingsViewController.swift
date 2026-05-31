@@ -10,6 +10,8 @@ final class PrivacySettingsViewController: SettingsTabViewController {
     private let permissionIcon = NSImageView()
     private let permissionButton = NSButton(title: "", target: nil, action: nil)
 
+    private let restoreShortcutsButton = NSButton(title: "", target: nil, action: nil)
+
     private var cancellables = Set<AnyCancellable>()
     private var axTimer: Timer?
 
@@ -56,6 +58,28 @@ final class PrivacySettingsViewController: SettingsTabViewController {
             accessory: permissionAccessory,
             searchItemID: SearchID.accessibility
         )
+
+        // Recovery section — manual escape hatch if the native ⌘Tab is stuck.
+        // BetterCmdTab disables the system's ⌘Tab so it can take over under
+        // Secure Event Input; that disable lives in the WindowServer and
+        // outlives the process, so an unclean exit (crash, Force Quit) can leave
+        // macOS's own ⌘Tab dead. This button re-enables every native chord, then
+        // the live trigger re-disables only what it currently needs.
+        let recovery = addSection(title: String(localized: "Recovery"), anchor: SettingsAnchor.recovery)
+
+        restoreShortcutsButton.bezelStyle = .rounded
+        restoreShortcutsButton.controlSize = .small
+        restoreShortcutsButton.title = String(localized: "Restore")
+        restoreShortcutsButton.target = self
+        restoreShortcutsButton.action = #selector(restoreNativeShortcuts)
+
+        addRow(
+            to: recovery,
+            title: String(localized: "Restore macOS keyboard shortcuts"),
+            subtitle: String(localized: "Re-enable the system's ⌘Tab and ⌘` — for example if they got stuck off after a crash. BetterCmdTab hands them back to macOS until you next relaunch it."),
+            accessory: restoreShortcutsButton,
+            searchItemID: SearchID.restoreShortcuts
+        )
     }
 
     private func configureSwitch(_ toggle: NSSwitch, action: Selector) {
@@ -90,6 +114,13 @@ final class PrivacySettingsViewController: SettingsTabViewController {
     @objc private func openSystemSettings() {
         AccessibilityCheck.promptIfNeeded()
         AccessibilityCheck.openSystemSettings()
+    }
+
+    @objc private func restoreNativeShortcuts() {
+        // Hand off to the live SwitcherController (it owns the symbolic-hotkey
+        // state and the Carbon fallback), which re-enables every native chord and
+        // then re-syncs the override for the current trigger.
+        NotificationCenter.default.post(name: Notification.Name("BetterCmdTab_restoreNativeShortcuts"), object: nil)
     }
 
     private func refreshAccessibilityStatus() {

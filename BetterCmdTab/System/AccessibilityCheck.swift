@@ -25,24 +25,59 @@ enum AccessibilityCheck {
 }
 
 final class AccessibilityWaiter {
+    /// Fired once, the first time Accessibility trust is observed — boots the
+    /// switcher controller.
     var onTrusted: () -> Void = {}
+
+    /// Fired on every trust transition *after* the initial grant: `true` when
+    /// re-granted, `false` when revoked at runtime. Without this the waiter was
+    /// one-shot, so revoking Accessibility while the app ran left ⌘Tab silently
+    /// dead (the CGEvent tap dies on revoke) with no signal and no recovery but
+    /// a relaunch. The monitor keeps polling for the app's lifetime so a
+    /// revoke/re-grant is noticed and the tap can be re-armed.
+    var onTrustChanged: (Bool) -> Void = { _ in }
+
     private var timer: Timer?
+    private var didGrantInitially = false
+    private var lastTrusted = false
 
     func start() {
         if AccessibilityCheck.isTrusted {
+            lastTrusted = true
+            didGrantInitially = true
             onTrusted()
-            return
+        } else {
+            AccessibilityCheck.promptIfNeeded()
         }
-        AccessibilityCheck.promptIfNeeded()
-        let t = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
-            guard let self else { timer.invalidate(); return }
-            if AccessibilityCheck.isTrusted {
-                timer.invalidate()
-                self.timer = nil
-                self.onTrusted()
-            }
+        startMonitor()
+    }
+
+    /// Low-frequency trust poll that runs for the app's lifetime.
+    /// `AXIsProcessTrusted()` is a cheap local TCC check (no XPC round-trip), so
+    /// a 2 s cadence is free while still catching a revoke/re-grant within a
+    /// couple of seconds.
+    private func startMonitor() {
+        guard timer == nil else { return }
+        let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.poll()
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+    }
+
+    private func poll() {
+        let trusted = AccessibilityCheck.isTrusted
+        guard trusted != lastTrusted else { return }
+        lastTrusted = trusted
+        if trusted {
+            if didGrantInitially {
+                onTrustChanged(true)
+            } else {
+                didGrantInitially = true
+                onTrusted()
+            }
+        } else {
+            onTrustChanged(false)
+        }
     }
 }

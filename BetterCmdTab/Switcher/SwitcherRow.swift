@@ -169,6 +169,24 @@ struct SwitcherRow {
         }
     }
 
+    /// Collapse a browser-tab row back to its parent-window row — the inverse of
+    /// `browserTabRows`, reconstructing the window row from the tab's stored
+    /// `parentTitle`. Returns `self` for non-tab rows. Lets the controller
+    /// re-derive a fresh collapsed source for re-expansion straight from the
+    /// displayed rows, rather than keeping a parallel array that can drift.
+    func collapsedFromBrowserTab() -> SwitcherRow {
+        guard let bt = browserTab, case .running(let app) = subject else { return self }
+        return SwitcherRow(
+            app: app,
+            window: window,
+            windowTitle: bt.parentTitle,
+            isMinimized: isMinimized,
+            isFullscreen: isFullscreen,
+            cgWindowID: cgWindowID,
+            browserTab: nil
+        )
+    }
+
     /// True when this row has a tab group worth peeking with `\` — either native
     /// window-tab siblings or an in-content `AXTabs` group.
     var hasTabs: Bool { tabWindows.count > 1 || tabs.count > 1 }

@@ -157,11 +157,28 @@ enum BrowserTabs {
         }
         closeParentWriteEnds()
 
+        // Drain stdout and stderr to EOF *before* reaping. `readDataToEndOfFile`
+        // returns only once the child closes its write ends (i.e. exits), and a
+        // child that emits more than the ~64KB pipe buffer blocks on its `write`
+        // until we read — so waiting on `waitpid` first would deadlock against a
+        // browser with a large tab list. The two pipes are drained on separate
+        // threads to also avoid the classic two-pipe stall (filling stderr while
+        // we block reading stdout). Both EOF, then `waitpid` just reaps.
+        final class DataBox: @unchecked Sendable { var data = Data() }
+        let errBox = DataBox()
+        let errReadHandle = errPipe.fileHandleForReading
+        let errDrained = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            errBox.data = errReadHandle.readDataToEndOfFile()
+            errDrained.signal()
+        }
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        errDrained.wait()
+        let errData = errBox.data
+
         var stat: Int32 = 0
         waitpid(pid, &stat, 0)
         let exitCode = (stat & 0xff00) >> 8
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         let stderr = String(data: errData, encoding: .utf8) ?? ""
         if exitCode != 0 || !stderr.isEmpty {
@@ -334,6 +351,68 @@ enum BrowserTabs {
         return .tabs(titles)
     }
 
+    /// List every window of `app` together with its tab titles in a **single**
+    /// Apple Events round-trip (one `osascript` spawn per browser, not one per
+    /// window). The process spawn dominates the cost, so batching is both faster
+    /// and lighter on CPU than calling `tabTitles` per window. No `AXRaise`, so
+    /// it never reorders the user's windows.
+    ///
+    /// Returns `(windowTitle, tabTitles)` per window, in window order. Empty on
+    /// no windows / failure / unsupported (the caller negative-caches). The
+    /// caller maps results back to its AX window elements by (trimmed) title;
+    /// windows whose title isn't unique are left for the caller to skip.
+    ///
+    /// Records are framed with ASCII control chars that can't appear in titles:
+    /// GS (29) between windows, RS (30) between a window's title, its active-tab
+    /// title, and its tab list, US (31) between tabs. Run off-main.
+    static func allWindowTabs(for app: NSRunningApplication) -> [(title: String, activeTab: String, tabs: [String])] {
+        guard let family = Family.from(bundleID: app.bundleIdentifier),
+              let bid = app.bundleIdentifier else { return [] }
+        let appLit = appLiteral(bid)
+        let attr: String = (family == .safari) ? "name" : "title"
+        // A browser window's AX title reflects its active tab, so also capture the
+        // active tab's title per window for the caller to match AX windows by.
+        let activeExpr: String = (family == .safari)
+            ? "name of current tab of window i"
+            : "title of active tab of window i"
+        let source = """
+        tell \(appLit)
+            with timeout of 5 seconds
+                set wc to count of windows
+                if wc is 0 then return "NOWINDOWS"
+                set outText to ""
+                repeat with i from 1 to wc
+                    set wTitle to (\(attr) of window i) as text
+                    set att to ""
+                    try
+                        set att to (\(activeExpr)) as text
+                    end try
+                    set tabNames to (\(attr) of every tab of window i)
+                    set AppleScript's text item delimiters to (ASCII character 31)
+                    set tabText to tabNames as text
+                    set AppleScript's text item delimiters to ""
+                    set outText to outText & wTitle & (ASCII character 30) & att & (ASCII character 30) & tabText
+                    if i < wc then set outText to outText & (ASCII character 29)
+                end repeat
+                return outText
+            end timeout
+        end tell
+        """
+        guard let raw = runScript(source) else {
+            NSLog("BrowserTabs: allWindowTabs \(bid) failed (permission/timeout?)")
+            return []
+        }
+        if raw == "NOWINDOWS" || raw.isEmpty { return [] }
+        var out: [(title: String, activeTab: String, tabs: [String])] = []
+        for block in raw.components(separatedBy: "\u{1D}") {
+            let parts = block.components(separatedBy: "\u{1E}")
+            guard parts.count == 3 else { continue }
+            let tabs = parts[2].isEmpty ? [] : parts[2].components(separatedBy: "\u{1F}")
+            out.append((title: parts[0], activeTab: parts[1], tabs: tabs))
+        }
+        return out
+    }
+
     /// Switch the row window's browser tab to `tabIndex` (0-based here, 1-based
     /// for AppleScript) and bring the browser forward. Run off-main.
     ///
@@ -405,6 +484,74 @@ enum BrowserTabs {
             with timeout of 3 seconds
                 if (count of windows) = 0 then return "false"
         \(selectBody("window 1"))
+            end timeout
+        end tell
+        """
+        guard let raw = runScript(source) else { return false }
+        return raw == "true"
+    }
+
+    /// Close the row window's browser tab at `tabIndex` (0-based here, 1-based for
+    /// AppleScript) via Apple Events. Run off-main. Unlike `activateTab`, the
+    /// preferred name-match path neither raises nor activates — closing a tab from
+    /// the switcher must not steal focus or reorder the browser's windows; only
+    /// the ambiguous-title fallback raises (the sole way to disambiguate the
+    /// window), mirroring `activateTab`.
+    static func closeTab(at tabIndex: Int, in app: NSRunningApplication, window: AXUIElement, title: String) -> Bool {
+        guard let family = Family.from(bundleID: app.bundleIdentifier),
+              let bid = app.bundleIdentifier else { return false }
+        let appLit = appLiteral(bid)
+        let attr: String = (family == .safari) ? "name" : "title"
+        let oneBased = tabIndex + 1
+
+        // "close tab N of <windowExpr>" — same keyword in both dictionaries.
+        func closeBody(_ windowExpr: String) -> String {
+            """
+                    set tabCount to count of tabs of \(windowExpr)
+                    if \(oneBased) > tabCount then return "false"
+                    close tab \(oneBased) of \(windowExpr)
+                    return "true"
+            """
+        }
+
+        // Preferred path: close within the name-matched window, no raise.
+        if !title.isEmpty {
+            let lit = escape(title)
+            let matchSource = """
+            tell \(appLit)
+                with timeout of 3 seconds
+                    set wc to count of windows
+                    if wc = 0 then return "false"
+                    set matchIdx to 0
+                    set matchCount to 0
+                    repeat with i from 1 to wc
+                        ignoring white space
+                            if (\(attr) of window i) is "\(lit)" then
+                                set matchIdx to i
+                                set matchCount to matchCount + 1
+                            end if
+                        end ignoring
+                    end repeat
+                    if matchCount is 1 then
+            \(closeBody("window matchIdx"))
+                    else
+                        return "FALLBACK"
+                    end if
+                end timeout
+            end tell
+            """
+            if let raw = runScript(matchSource), raw != "FALLBACK" {
+                return raw == "true"
+            }
+        }
+
+        // Fallback: raise the row's window frontmost, operate on `window 1`.
+        raiseInBrowser(window, pid: app.processIdentifier)
+        let source = """
+        tell \(appLit)
+            with timeout of 3 seconds
+                if (count of windows) = 0 then return "false"
+        \(closeBody("window 1"))
             end timeout
         end tell
         """

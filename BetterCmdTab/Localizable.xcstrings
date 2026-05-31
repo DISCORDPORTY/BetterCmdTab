@@ -197,6 +197,35 @@
         }
       }
     },
+    "Accessibility access was turned off" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bedienungshilfen-Zugriff wurde deaktiviert"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Se desactivó el acceso de Accesibilidad"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L'accès à l'Accessibilité a été désactivé"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wyłączono dostęp do funkcji Dostępność"
+          }
+        }
+      }
+    },
     "Action buttons on hover" : {
       "localizations" : {
         "de" : {
@@ -754,6 +783,35 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Kopia zapasowa"
+          }
+        }
+      }
+    },
+    "BetterCmdTab needs Accessibility permission to handle ⌘Tab. Re-enable it in System Settings and the switcher reactivates automatically." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "BetterCmdTab benötigt die Bedienungshilfen-Berechtigung für ⌘Tab. Aktiviere sie in den Systemeinstellungen erneut, dann reaktiviert sich der Umschalter automatisch."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "BetterCmdTab necesita el permiso de Accesibilidad para gestionar ⌘Tab. Vuelve a activarlo en Ajustes del Sistema y el conmutador se reactivará automáticamente."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "BetterCmdTab a besoin de l'autorisation d'Accessibilité pour gérer ⌘Tab. Réactive-la dans Réglages Système et le sélecteur se réactive automatiquement."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "BetterCmdTab potrzebuje uprawnienia Dostępności, aby obsługiwać ⌘Tab. Włącz je ponownie w Ustawieniach systemowych, a przełącznik uaktywni się automatycznie."
           }
         }
       }
@@ -3113,6 +3171,35 @@
         }
       }
     },
+    "Later" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Später"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Más tarde"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Plus tard"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Później"
+          }
+        }
+      }
+    },
     "Launch" : {
       "localizations" : {
         "de" : {
@@ -4066,6 +4153,35 @@
         }
       }
     },
+    "Open Accessibility Settings" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bedienungshilfen-Einstellungen öffnen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Abrir ajustes de Accesibilidad"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ouvrir les réglages d'Accessibilité"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Otwórz ustawienia Dostępności"
+          }
+        }
+      }
+    },
     "Open BetterCmdTab automatically when you log in." : {
       "localizations" : {
         "de" : {
@@ -4823,6 +4939,35 @@
         }
       }
     },
+    "Re-enable the system's ⌘Tab and ⌘` — for example if they got stuck off after a crash. BetterCmdTab hands them back to macOS until you next relaunch it." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aktiviere ⌘Tab und ⌘` des Systems erneut – etwa wenn sie nach einem Absturz deaktiviert blieben. BetterCmdTab gibt sie an macOS zurück, bis du es neu startest."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vuelve a activar ⌘Tab y ⌘` del sistema, por ejemplo si se quedaron desactivados tras un fallo. BetterCmdTab los devuelve a macOS hasta que lo reinicies."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réactive ⌘Tab et ⌘` du système — par exemple s'ils sont restés désactivés après un plantage. BetterCmdTab les rend à macOS jusqu'au prochain redémarrage."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ponownie włącz systemowe ⌘Tab i ⌘` — np. jeśli zostały wyłączone po awarii. BetterCmdTab oddaje je systemowi macOS do następnego uruchomienia aplikacji."
+          }
+        }
+      }
+    },
     "Recently closed to show" : {
       "localizations" : {
         "de" : {
@@ -4847,6 +4992,35 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ile ostatnio zamkniętych pokazywać"
+          }
+        }
+      }
+    },
+    "Recovery" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wiederherstellung"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recuperación"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Récupération"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Odzyskiwanie"
           }
         }
       }
@@ -5127,6 +5301,64 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Uruchom ponownie, aby uaktualnić"
+          }
+        }
+      }
+    },
+    "Restore" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wiederherstellen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Restaurar"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Restaurer"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Przywróć"
+          }
+        }
+      }
+    },
+    "Restore macOS keyboard shortcuts" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "macOS-Tastaturkürzel wiederherstellen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Restaurar los atajos de teclado de macOS"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Restaurer les raccourcis clavier de macOS"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Przywróć skróty klawiszowe macOS"
           }
         }
       }

@@ -35,6 +35,7 @@ enum SettingsAnchor {
     // Privacy
     static let screenSharing = "privacy.screenSharing"
     static let permissions = "privacy.permissions"
+    static let recovery = "privacy.recovery"
     // Switcher
     static let contents = "switcher.contents"
     static let tabs = "switcher.tabs"
@@ -64,6 +65,7 @@ enum SearchID {
     static let sound = "general.sound"
     static let hideFromScreenSharing = "general.hideFromScreenSharing"
     static let accessibility = "general.accessibility"
+    static let restoreShortcuts = "privacy.restoreShortcuts"
     static let updateInterval = "general.updateInterval"
     static let beta = "general.beta"
     static let directActivation = "general.directActivation"
@@ -242,6 +244,9 @@ enum SettingsCatalog {
         // Privacy · Permissions
         item(SearchID.accessibility, .privacy, SettingsAnchor.permissions, "Privacy", "Permissions",
              String(localized: "Accessibility access"), ["accessibility", "permission", "grant", "trusted"]),
+        // Privacy · Recovery
+        item(SearchID.restoreShortcuts, .privacy, SettingsAnchor.recovery, "Privacy", "Recovery",
+             String(localized: "Restore macOS keyboard shortcuts"), ["restore", "recover", "command tab", "cmd tab", "native", "symbolic hotkey", "stuck", "reset shortcuts"]),
 
         // Switcher · Contents
         item(SearchID.showMinimized, .switcher, SettingsAnchor.contents, "Switcher", "Contents",

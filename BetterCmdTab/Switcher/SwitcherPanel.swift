@@ -108,8 +108,18 @@ final class SwitcherPanel: NSPanel {
         // action buttons) stop receiving clicks and keyboard focus drifts. Re-key
         // on the next runloop so the panel stays interactive while it's on screen.
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.isVisible, !self.isKeyWindow else { return }
-            self.makeKeyAndOrderFront(nil)
+            guard let self, self.isVisible else { return }
+            if !self.isKeyWindow { self.makeKeyAndOrderFront(nil) }
+            // NSGlassEffectView's active look is decided window-server-side from
+            // the owning app's real activation state (the in-process
+            // appearsActive override can't reach it), so a transient app
+            // deactivation during switching dims the glass. Re-activate while the
+            // panel is on screen so it always reads as active.
+            if #available(macOS 14.0, *) {
+                NSApp.activate()
+            } else {
+                NSApp.activate(ignoringOtherApps: true)
+            }
         }
     }
 

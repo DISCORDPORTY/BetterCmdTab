@@ -42,8 +42,14 @@ final class HotkeyTap {
         case tabNext
         case commitTab
         case letterInput(Character)
+        /// Like `letterInput`, but carrying the raw keycode instead of a resolved
+        /// character — emitted by the secure-input Carbon-chord path, which has no
+        /// layout context. Translated to a character at dispatch (`handle(_:)`).
+        case letterInputKey(UInt32)
         case toggleSearch
         case searchInput(Character)
+        /// Keycode-carrying counterpart of `searchInput` (see `letterInputKey`).
+        case searchInputKey(UInt32)
         case searchBackspace
         /// ⌘F while the switcher is open: toggle native full screen on the
         /// highlighted row's window.

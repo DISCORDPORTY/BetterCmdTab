@@ -105,6 +105,10 @@ While Cmd is held:
 
 The `Cmd + Tab` activation hotkey is configurable in Settings; you can also trigger the switcher with a three-finger trackpad swipe. Separately, you can assign a global shortcut per app slot to jump straight to (or launch) a chosen app without opening the switcher.
 
+### Under a password prompt (Secure Event Input)
+
+When another app has a focused secure-text field — KeePassXC's database-unlock screen, for example — macOS routes keystrokes straight to it and withholds them from every background app (Apple [TN2150](https://developer.apple.com/library/archive/technotes/tn2150/_index.html)). BetterCmdTab still works there, and **its own switcher opens on `Cmd + Tab`, not the native one.** The only keys that reach a background app in this state are `Cmd`-qualified, so the rule is *keep `Cmd` held and add it to everything* — every shortcut in the table above works as written (`Cmd + arrows`, `Cmd + <letter>`, `Cmd + /` then `Cmd + letters`, `Cmd + W/M/H/Q/F`), commit by releasing `Cmd` (or `Cmd + Return`), cancel with `Cmd + Esc`, or click a tile (the mouse always works). Tab drill-in needs `Cmd + \` here (plain `\` elsewhere). The one limit: after you *release* `Cmd` in stay-open/sticky mode (or a gesture-opened panel), the keyboard goes quiet — macOS won't hand plain keys to a background app — so finish those with a click.
+
 ## Requirements
 
 - macOS 13.0 (Ventura) or newer
@@ -114,7 +118,7 @@ Liquid Glass rendering requires macOS 26. On 13–15 you get NSVisualEffectView 
 
 ## Known issues
 
-- **Secure Event Input (password fields).** When an app has a focused secure-text field — for example KeePassXC's database-unlock screen — macOS routes keystrokes straight to that app and withholds them from every event monitor (Apple [TN2150](https://developer.apple.com/library/archive/technotes/tn2150/_index.html)). BetterCmdTab still opens on ⌘Tab in this state (it registers a system hot key that survives Secure Input and suppresses the native switcher), and tapping Tab / ⇧Tab to step plus releasing ⌘ to commit all work. In-panel keys that rely on the event tap — arrow navigation, fuzzy search (`/`), letter-jump, and the W/M/H/Q actions — do **not** respond while the other app holds Secure Input; release ⌘ to commit, or click a tile with the mouse.
+- **macOS ⌘Tab stays dead after a crash or Force Quit.** To make sure *its* switcher — not the native one — wins the instant a password field grabs Secure Event Input (there's no notification for that transition, only a poll, so disabling on demand would leave a brief gap where the native ⌘Tab fires), BetterCmdTab keeps the system's own ⌘Tab / ⌘` symbolic hotkeys disabled the whole time it runs and re-enables them when it quits. That disable lives in the WindowServer and outlives the process, so a crash or Force Quit / `kill -9` leaves the system ⌘Tab disabled until you recover it; fixes, easiest first: relaunch BetterCmdTab (it heals a stale disable on startup); click **Restore macOS keyboard shortcuts** in Settings → Privacy → Recovery (hands the native ⌘Tab back and steps aside until you next relaunch the app); or log out and back in (the disable is per-login-session and resets on logout/reboot).
 
 ## Privacy
 

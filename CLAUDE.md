@@ -1,18 +1,9 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Tooling policy — reach for caveman + rtk FIRST
+## Tooling policy — reach for caveman first
 
 Default tool-selection order for every task. Only fall back to a lower tier when the
 preferred tool structurally can't do the job (not merely because it feels faster).
 
-1. **rtk** for shell. Every `Bash` command is auto-rewritten by the Claude Code hook
-   into `rtk <cmd>` (transparent, 0 token overhead, 60–90% output savings). Invoke rtk
-   meta commands directly when you need them: `rtk gain`, `rtk gain --history`,
-   `rtk discover`, `rtk proxy <cmd>` (raw, bypass filtering — use for debugging when the
-   filtered output drops something you need).
-2. **cavecrew subagents** over inline reading/editing/reviewing and over vanilla
+1. **cavecrew subagents** over inline reading/editing/reviewing and over vanilla
    `Explore`/`Agent`. Their output is caveman-compressed (~60% smaller back into main
    context), so prefer them whenever the job fits their scope:
    - `cavecrew-investigator` — locate code ("where is X", "what calls Y", "map this dir").
@@ -21,9 +12,9 @@ preferred tool structurally can't do the job (not merely because it feels faster
      format-preserving tweak). It **hard-refuses 3+ file scope and new features** — that
      refusal is the signal to fall back, not a reason to avoid trying it first.
    - `cavecrew-reviewer` — diff / branch / file review, one line per finding.
-3. **caveman skills** for their specific jobs: `/caveman-commit` (commit messages),
+2. **caveman skills** for their specific jobs: `/caveman-commit` (commit messages),
    `/caveman-review` (PR feedback), `/caveman-compress` (shrink memory files).
-4. **Fall back** to native `Read`/`Edit`/`Write`/`Grep`/`Glob`, `Explore`, or a
+3. **Fall back** to native `Read`/`Edit`/`Write`/`Grep`/`Glob`, `Explore`, or a
    `general-purpose` Agent only when the tiers above can't cover the work — e.g. a
    cross-file (3+) refactor that `cavecrew-builder` refuses, a new feature spanning many
    files, or multi-step research no single cavecrew role handles.

@@ -165,4 +165,31 @@ struct SwitcherRowTests {
         #expect(out.count == 1)
         #expect(out.first?.browserTab == nil)
     }
+
+    @Test("collapsedFromBrowserTab inverts browserTabRows")
+    func browserTabCollapseRoundTrip() {
+        let parent = browserWindowRow(title: "Parent")
+        let tabs = parent.browserTabRows(tabTitles: ["A", "B", "C"])
+        #expect(tabs.count == 3)
+        // Each expanded tab collapses back to the same parent-window row: the
+        // window title is restored from parentTitle and the tab marker is gone.
+        for tab in tabs {
+            #expect(tab.browserTab != nil)
+            let collapsed = tab.collapsedFromBrowserTab()
+            #expect(collapsed.browserTab == nil)
+            #expect(collapsed.windowTitle == "Parent")
+            #expect(collapsed.cgWindowID == parent.cgWindowID)
+            #expect(collapsed.isMinimized == parent.isMinimized)
+            #expect(collapsed.isFullscreen == parent.isFullscreen)
+            #expect(collapsed.pid == parent.pid)
+        }
+    }
+
+    @Test("collapsedFromBrowserTab is identity for a non-tab row")
+    func collapseNonTabRowIsIdentity() {
+        let parent = browserWindowRow(title: "Parent")
+        let collapsed = parent.collapsedFromBrowserTab()
+        #expect(collapsed.browserTab == nil)
+        #expect(collapsed.windowTitle == parent.windowTitle)
+    }
 }

@@ -27,9 +27,22 @@
 		7559A7642FC06FD6004D97B7 /* BetterCmdTabTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BetterCmdTabTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		AAFF000000000000000000F1 /* Exceptions for "BetterCmdTab" folder in "BetterCmdTab" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 7559A7562FC06FD5004D97B7 /* BetterCmdTab */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		7559A7592FC06FD5004D97B7 /* BetterCmdTab */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				AAFF000000000000000000F1 /* Exceptions for "BetterCmdTab" folder in "BetterCmdTab" target */,
+			);
 			path = BetterCmdTab;
 			sourceTree = "<group>";
 		};

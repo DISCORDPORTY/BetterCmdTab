@@ -81,6 +81,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         waiter.onTrusted = { [weak self] in
             self?.bootController()
         }
+        waiter.onTrustChanged = { [weak self] trusted in
+            self?.handleAccessibilityTrustChange(trusted)
+        }
         waiter.start()
         axWaiter = waiter
 
@@ -97,6 +100,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let c = SwitcherController()
         c.start()
         controller = c
+    }
+
+    /// Whether the "Accessibility was revoked" alert is currently being shown,
+    /// so a repeating poll doesn't stack duplicate alerts.
+    private var accessibilityLostShown = false
+
+    /// React to a runtime Accessibility trust transition surfaced by
+    /// `AccessibilityWaiter`. On re-grant, boot the controller (if the app
+    /// launched untrusted) or re-arm the now-dead CGEvent tap. On revoke, tell
+    /// the user — otherwise ⌘Tab just stops working with no explanation.
+    private func handleAccessibilityTrustChange(_ trusted: Bool) {
+        if trusted {
+            accessibilityLostShown = false
+            if controller == nil {
+                bootController()
+            } else {
+                controller?.reinstallHotkeyTap()
+            }
+        } else {
+            notifyAccessibilityRevoked()
+        }
+    }
+
+    private func notifyAccessibilityRevoked() {
+        guard !accessibilityLostShown else { return }
+        accessibilityLostShown = true
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = String(localized: "Accessibility access was turned off")
+        alert.informativeText = String(localized: "BetterCmdTab needs Accessibility permission to handle ⌘Tab. Re-enable it in System Settings and the switcher reactivates automatically.")
+        alert.addButton(withTitle: String(localized: "Open Accessibility Settings"))
+        alert.addButton(withTitle: String(localized: "Later"))
+        let response = alert.runModal()
+        // Re-arm the prompt for the next revoke regardless of choice; if trust is
+        // still off, the next poll won't re-fire (no transition), so clearing the
+        // flag here is safe and only matters after a future re-grant cycle.
+        if response == .alertFirstButtonReturn {
+            AccessibilityCheck.openSystemSettings()
+        }
     }
 
     /// Adds or removes the status item to match `hideMenuBarIcon`. Safe to call

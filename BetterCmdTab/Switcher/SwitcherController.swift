@@ -21,6 +21,27 @@ final class SwitcherController: SwitcherViewDelegate {
     /// Native symbolic hotkeys (⌘Tab etc.) we've currently disabled at the
     /// WindowServer, so teardown / a remap can re-enable exactly those.
     private var disabledSymbolicKeys: [PrivateAPI.SymbolicHotKey] = []
+    /// Polls Secure Event Input. The native-shortcut override (symbolic disable +
+    /// Carbon registration) is applied ONLY while it is active — outside it the
+    /// tap alone suppresses + triggers ⌘Tab, so the native shortcut is never left
+    /// disabled across a crash (see `computeNativeOverridePlan`).
+    private let secureInputMonitor = SecureInputMonitor()
+    private var secureInputActive = false
+    /// Polls the hold modifier to detect ⌘-release under Secure Event Input
+    /// (where no release event is delivered) and to supply the live hold state
+    /// that gates the in-panel Carbon chords. Runs only while the panel is open
+    /// under secure input (see `syncNativeHotkeyOverride`).
+    private let holdMonitor = HoldModifierMonitor()
+    private var holdMonitorRunning = false
+    /// Set by the Privacy-pane "Restore macOS keyboard shortcuts" escape hatch.
+    /// While set, the native-shortcut override is fully suspended — the system's
+    /// ⌘Tab is left enabled and no Carbon chords are registered — so the user gets
+    /// their native ⌘Tab back. The tap still opens our switcher under normal
+    /// input; only under Secure Event Input does the native switcher win again,
+    /// until the next launch (this is in-memory, so a relaunch re-arms the
+    /// override). Exists because, always-armed, the override would otherwise
+    /// immediately re-disable whatever Restore just re-enabled.
+    private var nativeOverrideSuspended = false
     private let swipeTrigger = SwipeTrigger()
     private let spaceSwipeSuppressor = SpaceSwipeSuppressor()
     private let mru = MRUTracker()
@@ -84,7 +105,10 @@ final class SwitcherController: SwitcherViewDelegate {
     /// Set once the switcher has detached from the held modifier in
     /// `.stayOpen` search mode: from then on, releasing ⌘ (or any other
     /// modifier) no longer commits — only Return or a mouse click does.
-    private var stickyOpen: Bool = false
+    /// (The secure-input Carbon chords no longer key off this: they gate on the
+    /// live hold modifier + the search/drill mode, re-synced from the poller and
+    /// the search/drill transitions, so `stickyOpen` needs no `didSet` here.)
+    private var stickyOpen = false
     /// Browser tab drill-in state. While `tabDrillActive`, nav keys (Cmd+Tab,
     /// Cmd+Left/Right, arrows) step `tabIndex` inside the highlighted row's
     /// `tabs` array instead of changing the app selection. Reset on every row
@@ -131,11 +155,27 @@ final class SwitcherController: SwitcherViewDelegate {
     /// Inline browser-tab expansion (`expandBrowserTabsAsWindows`). Browser tabs
     /// aren't separate NSWindows, so each browser window's tab titles are fetched
     /// off-main via Apple Events and cached here, keyed by the parent window's AX
-    /// element. An empty array is a negative cache (no tabs / fetch failed) so the
-    /// window isn't re-scanned this session. Both are cleared when the panel
-    /// dismisses (titles are a per-session snapshot, like `tabPrefetchCache`).
+    /// element. An empty array is a negative cache (no tabs / fetch failed). The
+    /// cache PERSISTS across panel opens (only the in-flight set is cleared on
+    /// dismiss) so a re-open expands instantly from cache instead of showing the
+    /// collapsed windows and then flickering to tabs after the Apple Events
+    /// round-trip; `browserTabsCacheStamp` throttles the background re-scan that
+    /// keeps the cache fresh.
     private var browserTabsCache: [AXRef: [String]] = [:]
     private var browserTabsFetchInFlight: Set<AXRef> = []
+    /// Monotonic timestamp (systemUptime) of the last successful tab fetch per
+    /// window. A window is re-scanned only when its entry is older than
+    /// `browserTabsCacheTTL`, bounding osascript spawns across rapid re-opens.
+    private var browserTabsCacheStamp: [AXRef: TimeInterval] = [:]
+    private static let browserTabsCacheTTL: TimeInterval = 3.0
+    /// Monotonic time of the last *forced* (event-driven) browser-tab scan. A
+    /// forced scan (a browser-window title change while the panel is open, which
+    /// fires when a tab is opened/closed/switched) bypasses the per-window TTL so
+    /// the rows sync near-instantly — but page-load title churn can fire many
+    /// such events a second, so a forced scan is rate-limited to this interval to
+    /// keep osascript spawns (and CPU) bounded.
+    private var lastForcedBrowserScanAt: TimeInterval = 0
+    private static let forcedBrowserScanMinInterval: TimeInterval = 0.4
     private var windowsOnlyMode: Bool = false
     private var windowsOnlyPid: pid_t? = nil
     private var windowsOnlyPrimedDelta: Int = 0
@@ -165,6 +205,13 @@ final class SwitcherController: SwitcherViewDelegate {
     }
     private var closedTombstones: [ClosedWindowSignature] = []
     private let tombstoneTTL: TimeInterval = 2.0
+    /// pids of apps the user quit from the switcher. Their rows are dropped
+    /// immediately so the app doesn't linger as a windowless row during the gap
+    /// between its windows closing and the process terminating; refreshes filter
+    /// these out until `handleAppTerminated` (or a safety timeout, for a quit a
+    /// save dialog vetoed) clears the pid.
+    private var quittingPids: Set<pid_t> = []
+    private let quitSuppressTTL: TimeInterval = 2.0
 
     /// Monotonic token bumped on every `reveal()` and `cancel()`. Background
     /// callbacks capture the value at dispatch time and bail out on return if
@@ -301,6 +348,10 @@ final class SwitcherController: SwitcherViewDelegate {
     }
 
     private func handleAppTerminated(pid: pid_t) {
+        // The app is gone — stop suppressing it (no-op if it was a window close,
+        // not a quit). Done before the guard so an optimistically-removed quit
+        // pid is always cleared.
+        quittingPids.remove(pid)
         guard phase == .visible, baseRows.contains(where: { $0.pid == pid }) else { return }
         baseRows.removeAll { $0.pid == pid }
         if baseRows.isEmpty {
@@ -322,6 +373,12 @@ final class SwitcherController: SwitcherViewDelegate {
     /// UserDefaults key recording which symbolic-hotkey ids we left disabled, so
     /// a launch following an unclean exit can restore them. See `SymbolicHotkeyGuard`.
     private static let persistedDisabledKey = "Switcher.disabledSymbolicHotKeys"
+
+    /// Count of consecutive CGEvent-tap install retries in flight, capped so a
+    /// permanently denied tap doesn't spin forever (the Carbon fallback still
+    /// drives the trigger meanwhile).
+    private var hotkeyTapRetries = 0
+    private static let maxHotkeyTapRetries = 5
 
     func start() {
         // Crash-safety for the WindowServer symbolic-hotkey disable (which
@@ -347,10 +404,16 @@ final class SwitcherController: SwitcherViewDelegate {
             self?.scheduleVisibleTitleRefresh()
         }
         RecentlyClosedStore.shared.start()
-        let installed = hotkey.install()
-        if !installed {
-            Log.switcher.error("CGEventTap installation failed — Accessibility not trusted?")
-            return
+        if !hotkey.install() {
+            // A failed tap install (e.g. Accessibility lost in the TOCTOU window
+            // between the waiter's trust check and here, or a transient
+            // WindowServer hiccup) must NOT abort the rest of `start()`. Bailing
+            // skipped the Carbon fallback wiring below — the very trigger that
+            // survives Secure Event Input — leaving the app dead with no retry.
+            // Wire everything anyway (the tap setters just stage state the tap
+            // reads once it comes up) and retry the tap on a short backoff.
+            Log.switcher.error("CGEventTap installation failed — Accessibility not trusted? Wiring Carbon fallback and retrying the tap.")
+            scheduleHotkeyTapRetry()
         }
         hotkey.onEvent = { [weak self] event in
             guard let self else { return }
@@ -372,6 +435,34 @@ final class SwitcherController: SwitcherViewDelegate {
         carbonTrigger.onEvent = { [weak self] event in self?.handle(event) }
         // Scoped-shortcut triggers open the switcher pre-filtered (#3).
         ScopedSwitch.onTrigger = { [weak self] scope in self?.openScoped(scope) }
+        // User-invoked recovery from the Privacy pane: re-enable every native
+        // symbolic hotkey we may have disabled, in case a prior unclean exit
+        // left the system ⌘Tab stuck. Re-syncs the live override afterwards so
+        // the current trigger re-disables only what it actually needs.
+        NotificationCenter.default.publisher(
+            for: Notification.Name("BetterCmdTab_restoreNativeShortcuts")
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in self?.restoreNativeShortcutsThenResync() }
+        .store(in: &cancellables)
+        // Apply the native-shortcut override only while another app holds Secure
+        // Event Input. No notification exists for it, so poll; re-sync on every
+        // transition. The synchronous initial read makes "launched while a
+        // password field is already focused" correct from boot.
+        secureInputMonitor.onChange = { [weak self] active in self?.handleSecureInputChange(active) }
+        secureInputMonitor.start()
+        secureInputActive = secureInputMonitor.isActive
+        // The hold-modifier poller feeds the same release path as the tap's
+        // flagsChanged (commit / detach / drill-commit), and re-syncs the
+        // registered chord set as the modifier goes up or down.
+        holdMonitor.onRelease = { [weak self] in self?.handle(.releaseCmd) }
+        // Re-sync the registered chords whenever the hold modifier goes up or down
+        // so the in-panel parity set precisely tracks it — in particular, a panel
+        // opened without the modifier (gesture/scoped, seeded `assumeHeld`) drops
+        // its parity chords on the first poll instead of leaving ⌘-qualified keys
+        // registered while the modifier is up. The redundant re-register on a
+        // commit (the release also closes the panel) is a cheap rare-path cost.
+        holdMonitor.onHoldChange = { [weak self] _ in self?.syncNativeHotkeyOverride() }
         pushHotkeyConfig()
         // In-panel action keys (#5) and window-management chords (#7) are
         // BetterShortcuts names; derive the tap's keycode maps from their stored
@@ -657,25 +748,101 @@ final class SwitcherController: SwitcherViewDelegate {
         return (fullscreen as? Bool) ?? false
     }
 
-    /// Keep the secure-input fallback in sync with the configured trigger:
-    /// suppress the matching native symbolic hotkeys and (re)register the Carbon
-    /// hot keys. Re-derived whenever `pushHotkeyConfig` runs (boot + remaps).
+    /// React to a Secure Event Input transition surfaced by `secureInputMonitor`:
+    /// re-derive and apply the native-shortcut override for the new state.
+    private func handleSecureInputChange(_ active: Bool) {
+        secureInputActive = active
+        syncNativeHotkeyOverride()
+    }
+
+    /// Re-derive the secure-input Carbon chords after an in-panel mode change
+    /// (search on/off, drill on/off): the letter keys switch between letter-jump
+    /// and search input, and the arrows between selection and tab stepping. A
+    /// no-op outside secure input or with the panel closed.
+    private func resyncSecureInputChords() {
+        if secureInputActive && phase != .idle { syncNativeHotkeyOverride() }
+    }
+
+    /// Re-derive and apply the native-shortcut override (symbolic-hotkey disable +
+    /// Carbon registration). The decision is pure — see `computeNativeOverridePlan`.
+    /// Re-run whenever an input changes: trigger remap (`pushHotkeyConfig`),
+    /// secure-input transition, or panel open/close while secure input is active.
     private func syncNativeHotkeyOverride() {
+        // Restore escape hatch active: keep native ⌘Tab enabled and drop all our
+        // Carbon chords until the next launch. The tap still opens our switcher
+        // under normal input.
+        if nativeOverrideSuspended {
+            if holdMonitorRunning {
+                holdMonitor.stop()
+                holdMonitorRunning = false
+            }
+            applyOverridePlan(NativeOverridePlan(symbolicKeysToDisable: [], carbonChords: []))
+            return
+        }
         let app = Self.carbonTrigger(for: .switchApps, defaultKey: 48)
         let window = Self.carbonTrigger(for: .switchWindows, defaultKey: 50)
-
-        // Decide which native symbolic hotkeys to suppress. Only when the trigger
-        // is exactly the native chord (⌘Tab / ⌘`) — a remap to anything else
-        // leaves macOS's own shortcut intact.
-        var toDisable: [PrivateAPI.SymbolicHotKey] = []
-        if app.isCommandOnly && app.keyCode == 48 {        // ⌘Tab → next/prev app
-            toDisable.append(.commandTab)
-            toDisable.append(.commandShiftTab)
+        let spec = TriggerSpec(
+            appKeyCode: app.keyCode,
+            appCarbonModifiers: app.carbonModifiers,
+            appIsCommandOnly: app.isCommandOnly,
+            windowKeyCode: window.keyCode,
+            windowCarbonModifiers: window.carbonModifiers,
+            windowIsCommandOnly: window.isCommandOnly
+        )
+        let panelOpen = phase != .idle
+        // The hold-modifier poller detects ⌘-release (no event is delivered for
+        // it under secure input) and supplies the live hold state that gates the
+        // in-panel chords. Needed only while the panel is open under secure input.
+        if secureInputActive && panelOpen {
+            if !holdMonitorRunning {
+                holdMonitor.start(mask: Self.holdMask(for: app.carbonModifiers), assumeHeld: true)
+                holdMonitorRunning = true
+            }
+        } else if holdMonitorRunning {
+            holdMonitor.stop()
+            holdMonitorRunning = false
         }
-        if window.isCommandOnly && window.keyCode == 50 {  // ⌘` → next window in app
-            toDisable.append(.commandKeyAboveTab)
-        }
+        let plan = computeNativeOverridePlan(
+            trigger: spec,
+            secureInputActive: secureInputActive,
+            panelOpen: panelOpen,
+            holdModifierDown: holdMonitor.isHeld,
+            searchActive: searchActive,
+            tabDrillActive: tabDrillActive,
+            panelActions: panelActionSpecs()
+        )
+        applyOverridePlan(plan)
+    }
 
+    /// The rebindable in-panel action keys (W/M/H/Q/F), in the pure plan's terms.
+    /// Same source as `pushPanelKeyBindings` — only the keycode matters in-panel.
+    private func panelActionSpecs() -> [PanelActionSpec] {
+        let pairs: [(BetterShortcuts.Name, ChordSpec.Kind)] = [
+            (.panelClose, .close),
+            (.panelMinimize, .minimize),
+            (.panelHide, .hide),
+            (.panelQuit, .quit),
+            (.panelFullscreen, .fullscreen),
+        ]
+        var specs: [PanelActionSpec] = []
+        for (name, action) in pairs {
+            guard let shortcut = BetterShortcuts.getShortcut(for: name) else { continue }
+            specs.append(PanelActionSpec(keyCode: UInt32(shortcut.carbonKeyCode), action: action))
+        }
+        return specs
+    }
+
+    /// The `CGEventFlags` mask for the trigger's primary hold modifier, used by
+    /// the poller to detect its release.
+    private static func holdMask(for carbonModifiers: UInt32) -> CGEventFlags {
+        if carbonModifiers & UInt32(cmdKey) != 0 { return .maskCommand }
+        if carbonModifiers & UInt32(optionKey) != 0 { return .maskAlternate }
+        if carbonModifiers & UInt32(controlKey) != 0 { return .maskControl }
+        return .maskCommand
+    }
+
+    private func applyOverridePlan(_ plan: NativeOverridePlan) {
+        let toDisable = plan.symbolicKeysToDisable.compactMap { PrivateAPI.SymbolicHotKey(rawValue: $0) }
         // Disable the symbolic hotkeys *before* registering: macOS reserves ⌘Tab
         // while its symbolic hotkey is enabled, so RegisterEventHotKey would fail.
         // Re-enable anything we previously disabled that's no longer in the set.
@@ -686,32 +853,115 @@ final class SwitcherController: SwitcherViewDelegate {
             disabledSymbolicKeys = toDisable
             persistDisabledSymbolicKeys(toDisable)
         }
+        carbonTrigger.update(plan.carbonChords.map { spec in
+            CarbonHotkeyTrigger.Chord(
+                keyCode: spec.keyCode,
+                modifiers: spec.modifiers,
+                event: Self.event(for: spec.kind, keyCode: spec.keyCode)
+            )
+        })
+    }
 
-        // Register forward + Shift-reverse chords for app switching, and the same
-        // for window switching when its chord differs (a duplicate chord would be
-        // rejected by RegisterEventHotKey).
-        let shift = UInt32(shiftKey)
-        var chords: [CarbonHotkeyTrigger.Chord] = [
-            .init(keyCode: app.keyCode, modifiers: app.carbonModifiers, event: .nextApp),
-            .init(keyCode: app.keyCode, modifiers: app.carbonModifiers | shift, event: .prevApp),
-        ]
-        if window.keyCode != app.keyCode || window.carbonModifiers != app.carbonModifiers {
-            chords.append(.init(keyCode: window.keyCode, modifiers: window.carbonModifiers, event: .nextWindow))
-            chords.append(.init(keyCode: window.keyCode, modifiers: window.carbonModifiers | shift, event: .prevWindow))
+    private static func event(for kind: ChordSpec.Kind, keyCode: UInt32) -> HotkeyTap.Event {
+        switch kind {
+        case .nextApp: return .nextApp
+        case .prevApp: return .prevApp
+        case .nextWindow: return .nextWindow
+        case .prevWindow: return .prevWindow
+        case .navUp: return .prevRow
+        case .navDown: return .nextRow
+        case .navLeft: return .spatialLeft
+        case .navRight: return .spatialRight
+        case .commit: return .commit
+        case .escape: return .escape
+        case .toggleSearch: return .toggleSearch
+        case .searchBackspace: return .searchBackspace
+        case .enterTabDrill: return .enterTabDrill
+        case .exitTabDrill: return .exitTabDrill
+        case .tabPrev: return .tabPrev
+        case .tabNext: return .tabNext
+        case .commitTab: return .commitTab
+        // The pure plan has no layout context, so it tags alphanumeric chords by
+        // keycode; resolve to a character at dispatch (`handle(_:)`).
+        case .letterJump: return .letterInputKey(keyCode)
+        case .searchChar: return .searchInputKey(keyCode)
+        case .close: return .closeWindow
+        case .minimize: return .minimizeWindow
+        case .hide: return .hideApp
+        case .quit: return .quitApp
+        case .fullscreen: return .fullscreen
         }
-        carbonTrigger.update(chords)
     }
 
     /// Tear down OS-level state that outlives the process: re-enable the native
     /// symbolic hotkeys we suppressed (the disable persists after quit) and drop
     /// the Carbon hot keys. Call from `applicationWillTerminate`.
+    /// Re-arm the CGEvent tap after Accessibility was revoked and re-granted at
+    /// runtime. The revoked tap is dead — the system tears it down — so drop it
+    /// and create a fresh one. Trigger config, panel keymaps and the Carbon
+    /// fallback already live on the instance, so nothing else needs re-pushing.
+    func reinstallHotkeyTap() {
+        hotkey.uninstall()
+        if hotkey.install() {
+            hotkeyTapRetries = 0
+            Log.switcher.log("CGEventTap re-armed after Accessibility re-grant")
+        } else {
+            Log.switcher.error("CGEventTap re-arm failed after Accessibility re-grant; retrying")
+            scheduleHotkeyTapRetry()
+        }
+    }
+
+    /// Retry a failed `hotkey.install()` on a short backoff. Only reached after an
+    /// install that left the tap uncreated, so a plain `install()` (not a
+    /// reinstall) is safe — there is no live tap to leak. Gives up after
+    /// `maxHotkeyTapRetries`; the Carbon fallback keeps the trigger working
+    /// regardless, and a later Accessibility re-grant re-arms via the waiter.
+    private func scheduleHotkeyTapRetry() {
+        guard hotkeyTapRetries < Self.maxHotkeyTapRetries else {
+            Log.switcher.error("CGEventTap still failing after \(Self.maxHotkeyTapRetries) retries; relying on the Carbon fallback")
+            return
+        }
+        hotkeyTapRetries += 1
+        let attempt = hotkeyTapRetries
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            if self.hotkey.install() {
+                self.hotkeyTapRetries = 0
+                Log.switcher.log("CGEventTap installed on retry \(attempt)")
+            } else {
+                self.scheduleHotkeyTapRetry()
+            }
+        }
+    }
+
     func shutdown() {
+        secureInputMonitor.stop()
+        holdMonitor.stop()
+        holdMonitorRunning = false
         carbonTrigger.uninstall()
         if !disabledSymbolicKeys.isEmpty {
             PrivateAPI.setNativeCommandTabEnabled(true, disabledSymbolicKeys)
             disabledSymbolicKeys = []
         }
         persistDisabledSymbolicKeys([])
+    }
+
+    /// User-invoked recovery (Privacy pane "Restore macOS keyboard shortcuts").
+    /// The native override is always-armed (the symbolic ⌘Tab is disabled the
+    /// whole time the app runs, so our switcher wins the instant the tap goes deaf
+    /// under Secure Event Input). A re-enable alone would be undone immediately by
+    /// the next resync, so this *suspends* the override until the next launch:
+    /// force-enable *every* native symbolic hotkey we could have disabled
+    /// (regardless of the tracked `disabledSymbolicKeys` set, which can drift if a
+    /// prior run exited uncleanly), then resync — which, suspended, drops all our
+    /// Carbon chords and leaves the system's ⌘Tab alone. The user's native ⌘Tab
+    /// stays back until they relaunch BetterCmdTab (the suspension is in-memory).
+    private func restoreNativeShortcutsThenResync() {
+        nativeOverrideSuspended = true
+        PrivateAPI.setNativeCommandTabEnabled(true, [.commandTab, .commandShiftTab, .commandKeyAboveTab])
+        disabledSymbolicKeys = []
+        persistDisabledSymbolicKeys([])
+        syncNativeHotkeyOverride()
     }
 
     /// Mirror the disabled symbolic-hotkey set into both the crash-restore guard
@@ -801,6 +1051,7 @@ final class SwitcherController: SwitcherViewDelegate {
     private var phase: Phase {
         get { _phase }
         set {
+            let wasIdle = _phase == .idle
             _phase = newValue
             hotkey.setSwitching(newValue != .idle)
             // Returning to idle ends any scoped-shortcut open so the next plain
@@ -809,6 +1060,12 @@ final class SwitcherController: SwitcherViewDelegate {
             if newValue == .idle {
                 activeScope = nil
                 scopeFrontPid = nil
+            }
+            // Under Secure Event Input the in-panel nav chords are registered only
+            // while the panel is open, so re-sync on the open⇄close edge. Gated on
+            // `secureInputActive` so the common ⌘Tab path stays zero-cost.
+            if secureInputActive && wasIdle != (newValue == .idle) {
+                syncNativeHotkeyOverride()
             }
         }
     }
@@ -1029,6 +1286,16 @@ final class SwitcherController: SwitcherViewDelegate {
             commitTab()
         case .letterInput(let ch):
             handleLetter(ch)
+        case .letterInputKey(let keyCode):
+            // Secure-input Carbon path: resolve the keycode for the current
+            // layout, matching the tap's plain letter-jump (lowercased).
+            if let ch = KeyboardLayout.character(for: UInt16(keyCode)) {
+                handleLetter(Character(ch.lowercased()))
+            }
+        case .searchInputKey(let keyCode):
+            if let ch = KeyboardLayout.character(for: UInt16(keyCode)) {
+                handleSearchInput(ch)
+            }
         }
     }
 
@@ -1113,6 +1380,10 @@ final class SwitcherController: SwitcherViewDelegate {
     private func advanceWindowsOnly(by delta: Int) {
         switch phase {
         case .idle:
+            // Reaching here from the Carbon fallback means the tap was bypassed —
+            // strong evidence Secure Event Input is active. Re-check now to shrink
+            // the poll-gap window so the in-panel nav chords arm before the reveal.
+            secureInputMonitor.refresh()
             mru.syncFrontmost()
             // Kick a cache refresh now so the snapshot has the full
             // ~revealDelay window to settle before reveal() reads it — keeps
@@ -1143,6 +1414,9 @@ final class SwitcherController: SwitcherViewDelegate {
     private func advance(by delta: Int, wrap: Bool) {
         switch phase {
         case .idle:
+            // A Carbon chord opening the switcher means the tap was bypassed —
+            // re-check Secure Event Input now (see advanceWindowsOnly).
+            secureInputMonitor.refresh()
             mru.syncFrontmost()
             // Pre-warm the catalog before the ~100ms primed delay elapses so
             // reveal() reads an up-to-date cache instead of stale rows that
@@ -1265,6 +1539,10 @@ final class SwitcherController: SwitcherViewDelegate {
         // tap-vs-hold delay, so reveal() doesn't stall its critical path on a
         // synchronous AX read (up to 0.25s when the frontmost app is busy).
         prefetchOpenFocusedWindow()
+        // Inline browser-tab mode: warm the per-window tab cache during the same
+        // hold delay so the first reveal expands straight to tabs instead of
+        // showing windows that flicker into tabs after the Apple Events round-trip.
+        prewarmBrowserTabs()
         revealTimer?.invalidate()
         let timer = Timer(timeInterval: revealDelay, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -1376,6 +1654,22 @@ final class SwitcherController: SwitcherViewDelegate {
             rows = baseRows
             labels = baseLabels
             index = 0
+        }
+        // Expand inline browser-tab rows from the persisted per-session cache so a
+        // re-open shows tabs immediately instead of windows-then-flicker. The
+        // background re-scan re-derives its collapsed source from `baseRows`.
+        let expandedAtReveal = expandBrowserTabs(baseRows)
+        if expandedAtReveal.count != baseRows.count {
+            let selectedPid = rows.indices.contains(index) ? rows[index].pid : targetPid
+            baseRows = expandedAtReveal
+            baseLabels = RowLabels.labels(for: baseRows)
+            rows = baseRows
+            labels = baseLabels
+            if let pid = selectedPid, let match = rows.firstIndex(where: { $0.pid == pid }) {
+                index = match
+            } else {
+                index = max(0, min(index, rows.count - 1))
+            }
         }
         guard !rows.isEmpty else { cancel(); return }
 
@@ -1499,12 +1793,14 @@ final class SwitcherController: SwitcherViewDelegate {
         guard phase == .visible else { return }
         if fresh.isEmpty { cancel(); return }
 
+        // Drop apps being quit so a background refresh doesn't re-add one as a
+        // windowless row during its death gap (see `quittingPids`).
+        var next = filterQuitting(fresh)
         // Scoped open: narrow the refreshed snapshot the same way the reveal did.
         // If the scope empties it, keep the current rows rather than cancelling —
         // a transient empty refresh shouldn't tear the panel down.
-        var next = fresh
         if let scope = activeScope {
-            next = scopeFiltered(fresh, scope: scope)
+            next = scopeFiltered(next, scope: scope)
             if next.isEmpty { return }
         }
 
@@ -1559,6 +1855,13 @@ final class SwitcherController: SwitcherViewDelegate {
             guard let self else { return }
             self.visibleTitleRefreshScheduled = false
             guard self.phase == .visible, gen == self.revealGeneration else { return }
+            // A browser window's title changes when its tabs are opened/closed/
+            // switched, so reuse this title-change signal to re-scan its tabs
+            // immediately — the event-driven path that keeps the inline tab rows
+            // in near-instant sync with the browser without any idle polling.
+            // Self-filters to browser windows and is rate-limited, so calling it
+            // on every visible title change is cheap.
+            self.scheduleBrowserTabExpansion(force: true)
             let windows = self.baseRows.compactMap(\.window)
             guard !windows.isEmpty else { return }
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1575,7 +1878,13 @@ final class SwitcherController: SwitcherViewDelegate {
                     guard let self, gen == self.revealGeneration, self.phase == .visible else { return }
                     var changed = false
                     let patched = self.baseRows.map { row -> SwitcherRow in
-                        guard let w = row.window,
+                        // Skip inline browser-tab rows: they all share the parent
+                        // browser window, whose AX title is just the *active* tab —
+                        // patching here would stamp that one title (e.g. "New Tab")
+                        // onto every tab row. Their per-tab titles come from the
+                        // AppleScript scan (`browserTabsCache`) instead.
+                        guard row.browserTab == nil,
+                              let w = row.window,
                               let t = titles[AXRef(element: w)],
                               t != row.windowTitle else { return row }
                         changed = true
@@ -1613,65 +1922,182 @@ final class SwitcherController: SwitcherViewDelegate {
     }
 
     /// Kick a background Apple Events scan for every collapsed browser window in
-    /// `baseRows` whose tabs aren't cached yet, then splice the results in. Runs
-    /// off-main (each `BrowserTabs.tabTitles` is a blocking osascript round-trip)
-    /// and uses the name-match path (no raise) so listing tabs never reorders the
-    /// browser's windows. Windows with an empty/ambiguous title are skipped —
-    /// resolving them would need a raise, which the user would see as the panel
-    /// silently shuffling windows.
-    private func scheduleBrowserTabExpansion() {
-        guard Preferences.shared.expandBrowserTabsAsWindows, phase == .visible else { return }
-        struct Pending { let app: NSRunningApplication; let window: AXUIElement; let title: String; let key: AXRef }
-        var pending: [Pending] = []
+    /// `collapsedBrowserSource()`, then splice the results in. Runs off-main (each
+    /// `BrowserTabs.tabTitles` is a blocking osascript round-trip) and uses the
+    /// name-match path (no raise) so listing tabs never reorders the browser's
+    /// windows. Windows with an empty/ambiguous title are skipped — resolving them
+    /// would need a raise, which the user would see as the panel silently
+    /// shuffling windows. The persisted cache means a re-open already shows tabs;
+    /// this re-scan only refreshes entries older than `browserTabsCacheTTL` (or
+    /// never fetched), so opening rapidly doesn't re-spawn osascript every time.
+    /// Re-derive the collapsed (one-row-per-window) source from the currently
+    /// displayed `baseRows` — the inverse of `expandBrowserTabs`. Computed on
+    /// demand so it always reflects direct `baseRows` edits (a window close, an
+    /// app quit, a title patch) and can never resurrect a row a parallel array
+    /// would have gone stale on.
+    private func collapsedBrowserSource() -> [SwitcherRow] {
+        guard baseRows.contains(where: { $0.browserTab != nil }) else { return baseRows }
+        var out: [SwitcherRow] = []
+        out.reserveCapacity(baseRows.count)
+        var emitted = Set<AXRef>()
         for row in baseRows {
+            guard row.browserTab != nil, let window = row.window else {
+                out.append(row); continue
+            }
+            // One window row per distinct browser window; drop its other tab rows.
+            if emitted.insert(AXRef(element: window)).inserted {
+                out.append(row.collapsedFromBrowserTab())
+            }
+        }
+        return out
+    }
+
+    /// Scan the browser windows in `rows` and refresh `browserTabsCache`, then
+    /// re-expand. One batched osascript per browser app (see
+    /// `BrowserTabs.allWindowTabs`) instead of one per window. Used for the
+    /// reveal-time scan, the pre-roll pre-warm, and event-driven syncs.
+    ///
+    /// `force` bypasses the per-window TTL (for a title-change event, so a tab
+    /// add/close/switch syncs immediately) but is rate-limited by
+    /// `forcedBrowserScanMinInterval` so page-load title churn can't spam
+    /// osascript. `onDone` runs on the main actor after the cache is updated.
+    private func scanBrowserTabs(rows: [SwitcherRow], force: Bool, onDone: (() -> Void)? = nil) {
+        guard Preferences.shared.expandBrowserTabsAsWindows else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if force, now - lastForcedBrowserScanAt < Self.forcedBrowserScanMinInterval { return }
+
+        struct Target { let window: AXUIElement; let title: String; let key: AXRef }
+        var byApp: [pid_t: (app: NSRunningApplication, wins: [Target])] = [:]
+        var liveKeys = Set<AXRef>()
+        for row in rows {
             guard row.browserTab == nil,
                   let window = row.window, let app = row.app,
                   BrowserTabs.Family.from(bundleID: app.bundleIdentifier) != nil,
                   !Self.isOwnProcess(app),
                   !row.windowTitle.isEmpty else { continue }
             let key = AXRef(element: window)
-            if browserTabsCache[key] != nil || browserTabsFetchInFlight.contains(key) { continue }
-            pending.append(Pending(app: app, window: window, title: row.windowTitle, key: key))
+            liveKeys.insert(key)
+            if browserTabsFetchInFlight.contains(key) { continue }
+            // Skip a window whose cache entry is still fresh (unless forced); fall
+            // through when it's missing or older than the TTL so tab add/close shows.
+            if !force, let stamp = browserTabsCacheStamp[key], now - stamp < Self.browserTabsCacheTTL { continue }
+            byApp[app.processIdentifier, default: (app, [])].wins.append(
+                Target(window: window, title: row.windowTitle, key: key)
+            )
         }
-        guard !pending.isEmpty else { return }
-        for p in pending { browserTabsFetchInFlight.insert(p.key) }
-        let gen = revealGeneration
+        // The cache persists across opens, so prune entries for browser windows
+        // that are no longer present (closed since last seen) — keeps it bounded
+        // to the currently-open browser windows over a long session.
+        if browserTabsCache.contains(where: { !liveKeys.contains($0.key) }) {
+            browserTabsCache = browserTabsCache.filter { liveKeys.contains($0.key) }
+            browserTabsCacheStamp = browserTabsCacheStamp.filter { liveKeys.contains($0.key) }
+        }
+        guard !byApp.isEmpty else { return }
+        if force { lastForcedBrowserScanAt = now }
+        for (_, entry) in byApp { for t in entry.wins { browserTabsFetchInFlight.insert(t.key) } }
+        let apps = Array(byApp.values)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var fetched: [AXRef: [String]] = [:]
-            for p in pending {
-                switch BrowserTabs.tabTitles(for: p.app, window: p.window, title: p.title) {
-                case .tabs(let titles): fetched[p.key] = titles
-                // Negative-cache failures/unsupported so we don't re-spawn osascript
-                // for this window every refresh tick this session.
-                case .failed, .notSupported: fetched[p.key] = []
+            for entry in apps {
+                // A browser window's AX kAXTitleAttribute reflects its ACTIVE TAB,
+                // not the AppleScript window title (e.g. Arc reports "Arc" as the
+                // window title but the AX title is the active tab's title). Match AX
+                // titles against each window's active-tab title first, then the
+                // window title, then fall back to a direct 1:1 map for a single
+                // window. Titles that aren't unique are left collapsed (cached []).
+                let perWindow = BrowserTabs.allWindowTabs(for: entry.app)
+                var activeCounts: [String: Int] = [:]
+                var byActive: [String: [String]] = [:]
+                var titleCounts: [String: Int] = [:]
+                var byTitle: [String: [String]] = [:]
+                for w in perWindow {
+                    let a = w.activeTab.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !a.isEmpty { activeCounts[a, default: 0] += 1; byActive[a] = w.tabs }
+                    let t = w.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !t.isEmpty { titleCounts[t, default: 0] += 1; byTitle[t] = w.tabs }
+                }
+                for t in entry.wins {
+                    let k = t.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if activeCounts[k] == 1 {
+                        fetched[t.key] = byActive[k] ?? []
+                    } else if titleCounts[k] == 1 {
+                        fetched[t.key] = byTitle[k] ?? []
+                    } else if perWindow.count == 1 && entry.wins.count == 1 {
+                        fetched[t.key] = perWindow[0].tabs
+                    } else {
+                        // Negative-cache (empty) a missing/ambiguous window so we
+                        // don't re-spawn osascript for it every tick this session.
+                        fetched[t.key] = []
+                    }
                 }
             }
             DispatchQueue.main.async {
-                guard let self, gen == self.revealGeneration, self.phase == .visible else { return }
+                guard let self else { return }
+                let stamp = ProcessInfo.processInfo.systemUptime
                 for (k, v) in fetched {
                     self.browserTabsFetchInFlight.remove(k)
                     self.browserTabsCache[k] = v
+                    self.browserTabsCacheStamp[k] = stamp
                 }
-                self.reExpandBrowserTabs()
+                onDone?()
             }
         }
     }
 
-    /// Re-apply `expandBrowserTabs` to the current `baseRows` after a scan landed
-    /// and re-render. Skips the work when nothing actually expanded (every newly
-    /// scanned window had <2 tabs / failed), so a negative result is silent.
-    private func reExpandBrowserTabs() {
+    /// Reveal-time / post-action browser-tab scan over the currently displayed
+    /// rows. `force` is set for event-driven syncs (a title change).
+    private func scheduleBrowserTabExpansion(force: Bool = false) {
+        guard Preferences.shared.expandBrowserTabsAsWindows, phase == .visible else { return }
+        scanBrowserTabs(rows: collapsedBrowserSource(), force: force) { [weak self] in
+            self?.reExpandBrowserTabs()
+        }
+    }
+
+    /// Pre-warm the browser-tab cache during the primed phase (while ⌘ is held,
+    /// before the panel paints) from the catalog cache's windows, so the first
+    /// reveal expands straight to tabs instead of showing windows that flicker
+    /// into tabs ~1-2 s later. Throttled by the per-window TTL, so rapid ⌘Tab
+    /// cycling doesn't re-spawn osascript. The completion re-expands only if the
+    /// panel is already visible by the time it lands (otherwise `reveal()` picks
+    /// up the now-warm cache itself).
+    private func prewarmBrowserTabs() {
+        guard Preferences.shared.expandBrowserTabsAsWindows else { return }
+        scanBrowserTabs(rows: cache.rows(orderedBy: mru.order), force: false) { [weak self] in
+            self?.reExpandBrowserTabs()
+        }
+    }
+
+    /// Re-derive the expanded `baseRows` from `collapsedBrowserSource()` after a scan
+    /// landed (or after an optimistic cache edit) and re-render. By default skips
+    /// the re-render only when nothing visible changed — a tab added/closed
+    /// (count) OR any tab's title updated (e.g. "New Tab" → the loaded page title);
+    /// `force` re-renders regardless (used after closing a tab).
+    private func reExpandBrowserTabs(force: Bool = false) {
         guard phase == .visible else { return }
-        let expanded = expandBrowserTabs(baseRows)
-        guard expanded.count != baseRows.count else { return }
+        let expanded = expandBrowserTabs(collapsedBrowserSource())
+        guard force || Self.rowsDifferVisibly(expanded, baseRows) else { return }
         baseRows = expanded
         baseLabels = RowLabels.labels(for: baseRows)
         refreshDisplay()
     }
 
-    /// Drop the per-session browser-tab caches. Called whenever the panel ends.
+    /// Whether two row sequences differ in a way the user would see — a different
+    /// count, or any row whose displayed title changed. Used so a browser-tab
+    /// re-scan that loaded new titles (same tab count) still re-renders.
+    private static func rowsDifferVisibly(_ a: [SwitcherRow], _ b: [SwitcherRow]) -> Bool {
+        guard a.count == b.count else { return true }
+        for (x, y) in zip(a, b) where x.windowTitle != y.windowTitle { return true }
+        return false
+    }
+
+    /// Called whenever the panel ends. Deliberately KEEPS `browserTabsCache` (and
+    /// its staleness stamps) so the next open expands instantly from cache instead
+    /// of showing collapsed windows that flicker into tabs after the Apple Events
+    /// round-trip; only the in-flight set is cleared so a fetch interrupted by the
+    /// dismiss (its result dropped by the `phase == .visible` guard) can re-run.
+    /// The cache lives for the process; stale entries are refreshed by the
+    /// TTL-gated re-scan and harmless dead-window entries are never read again.
     private func clearBrowserTabExpansion() {
-        browserTabsCache.removeAll()
         browserTabsFetchInFlight.removeAll()
     }
 
@@ -1779,6 +2205,13 @@ final class SwitcherController: SwitcherViewDelegate {
         revealGeneration &+= 1
         phase = .idle
         cache.setPanelVisible(false)
+        // Activate BEFORE dismissing the panel: `panel.dismiss()` calls
+        // `orderOut(nil)`, surrendering our window/focus to the WindowServer.
+        // If that ran first, the synchronous AX focus writes inside the
+        // activation could be routed elsewhere and the target window would not
+        // end up focused. Running the activation first keeps focus deterministic.
+        if pendingActivation != nil { CommitFeedback.play() }
+        pendingActivation?()
         panel.dismiss()
         primedApps = []
         rows = []
@@ -1788,6 +2221,7 @@ final class SwitcherController: SwitcherViewDelegate {
         windowsOnlyPid = nil
         windowsOnlyPrimedDelta = 0
         closedTombstones.removeAll()
+        quittingPids.removeAll()
         clearBrowserTabExpansion()
         // Drop any focused-window prefetch so it can't survive into the next
         // session and be adopted by a gesture/scoped open that skips the primed
@@ -1799,8 +2233,6 @@ final class SwitcherController: SwitcherViewDelegate {
         resetLetterBuffer()
         resetSearch()
         view.releaseIdleResources()
-        if pendingActivation != nil { CommitFeedback.play() }
-        pendingActivation?()
     }
 
     private func cancel() {
@@ -1818,6 +2250,7 @@ final class SwitcherController: SwitcherViewDelegate {
         windowsOnlyPid = nil
         windowsOnlyPrimedDelta = 0
         closedTombstones.removeAll()
+        quittingPids.removeAll()
         tabDrillActive = false
         tabDrillHint = nil
         tabTitles = []
@@ -1898,19 +2331,55 @@ final class SwitcherController: SwitcherViewDelegate {
     }
 
     private func performQuitAction() {
-        performOnVisibleTarget { row in
-            // Record an app-level entry (no document) so a quit app can be
-            // relaunched from recently-closed search. Regular apps only —
-            // system dialog hosts shouldn't be reopenable.
-            if row.app?.activationPolicy == .regular, let bundleID = row.bundleIdentifier {
-                RecentlyClosedStore.shared.record(
-                    bundleID: bundleID,
-                    appName: row.appName,
-                    title: "",
-                    documentPath: nil
-                )
-            }
+        quitVisibleTarget(force: false)
+    }
+
+    /// Quit (or force-quit) the highlighted app and drop it from the switcher
+    /// immediately. Unlike closing a single window, quitting removes the whole
+    /// app, so we must NOT demote it to a windowless row — that's the brief
+    /// "no windows" flash the user sees while the app's windows close before the
+    /// process actually terminates. `quittingPids` suppresses re-adds from the
+    /// refresh until `handleAppTerminated` fires; a safety timeout un-suppresses
+    /// the app if the quit was vetoed (e.g. an unsaved-changes dialog).
+    private func quitVisibleTarget(force: Bool) {
+        guard phase == .visible, rows.indices.contains(index) else { return }
+        let row = rows[index]
+        guard !row.isSystemDialog else { return }
+        guard let pid = row.pid else { return }
+        // Record an app-level entry (no document) so a quit app can be relaunched
+        // from recently-closed search. Regular apps only — system dialog hosts
+        // shouldn't be reopenable.
+        if row.app?.activationPolicy == .regular, let bundleID = row.bundleIdentifier {
+            RecentlyClosedStore.shared.record(
+                bundleID: bundleID,
+                appName: row.appName,
+                title: "",
+                documentPath: nil
+            )
+        }
+        if force {
+            Activator.forceQuitApp(row)
+        } else {
             Activator.quitApp(row)
+        }
+
+        quittingPids.insert(pid)
+        baseRows.removeAll { $0.pid == pid }
+        if baseRows.isEmpty {
+            cancel()
+            return
+        }
+        baseLabels = RowLabels.labels(for: baseRows)
+        refreshDisplay()
+        scheduleVisibleRefresh(after: 0.25)
+
+        // Safety net: if the app is still alive after the grace (quit vetoed by a
+        // save dialog, a modal, etc.), stop suppressing it so it reappears.
+        let gen = revealGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + quitSuppressTTL) { [weak self] in
+            guard let self, gen == self.revealGeneration else { return }
+            guard self.quittingPids.remove(pid) != nil, self.phase == .visible else { return }
+            self.scheduleVisibleRefresh()
         }
     }
 
@@ -2010,6 +2479,7 @@ final class SwitcherController: SwitcherViewDelegate {
         stickyOpen = true
         hotkey.setTabDrillActive(true)
         refreshDisplay()
+        resyncSecureInputChords()
         tabPrefetchCache[AXRef(element: window)] = TabPrefetch(titles: titles, liveTabs: liveTabs, backend: backend)
     }
 
@@ -2126,6 +2596,7 @@ final class SwitcherController: SwitcherViewDelegate {
         drillWindow = nil
         hotkey.setTabDrillActive(false)
         refreshDisplay()
+        resyncSecureInputChords()
     }
 
     private func advanceTab(by delta: Int) {
@@ -2171,25 +2642,10 @@ final class SwitcherController: SwitcherViewDelegate {
         revealGeneration &+= 1
         phase = .idle
         cache.setPanelVisible(false)
-        panel.dismiss()
-        // Activating the chosen tab's app below; nothing to restore.
-        previousFrontmostApp = nil
-        tabDrillActive = false
-        tabTitles = []
-        liveTabElements = []
-        tabIndex = 0
-        drillWindow = nil
-        hotkey.setTabDrillActive(false)
-        primedApps = []
-        rows = []
-        baseRows = []
-        baseLabels = []
-        closedTombstones.removeAll()
-        clearBrowserTabExpansion()
-        resetLetterBuffer()
-        resetSearch()
-        view.releaseIdleResources()
         CommitFeedback.play()
+        // Activate BEFORE dismissing the panel (same reason as commit()):
+        // panel.dismiss() surrenders our key window, so a synchronous activate
+        // afterwards can lose focus back to the WindowServer.
         switch backend {
         case .appleScript:
             let title = row.windowTitle
@@ -2207,23 +2663,32 @@ final class SwitcherController: SwitcherViewDelegate {
                 Activator.activate(tabRow, instantSpace: instantSpace)
             }
         }
+        panel.dismiss()
+        // Activating the chosen tab's app above; nothing to restore.
+        previousFrontmostApp = nil
+        tabDrillActive = false
+        tabTitles = []
+        liveTabElements = []
+        tabIndex = 0
+        drillWindow = nil
+        hotkey.setTabDrillActive(false)
+        primedApps = []
+        rows = []
+        baseRows = []
+        baseLabels = []
+        closedTombstones.removeAll()
+        quittingPids.removeAll()
+        clearBrowserTabExpansion()
+        resetLetterBuffer()
+        resetSearch()
+        view.releaseIdleResources()
     }
 
     /// SIGKILL the highlighted app — bypasses the AppleEvent terminate() that
     /// hung apps ignore. Recorded in `RecentlyClosedStore` like a normal quit so
     /// the app can be relaunched from there.
     private func performForceQuitAction() {
-        performOnVisibleTarget { row in
-            if row.app?.activationPolicy == .regular, let bundleID = row.bundleIdentifier {
-                RecentlyClosedStore.shared.record(
-                    bundleID: bundleID,
-                    appName: row.appName,
-                    title: "",
-                    documentPath: nil
-                )
-            }
-            Activator.forceQuitApp(row)
-        }
+        quitVisibleTarget(force: true)
     }
 
     private func performCloseAction() {
@@ -2238,6 +2703,33 @@ final class SwitcherController: SwitcherViewDelegate {
         // re-demote the app, flashing its "no window" glyph off (re-inserted
         // suppressed) and back on (the grace reveal) — a visible blink.
         guard row.window != nil else { return }
+
+        // Inline browser-tab row: close just that tab, not its parent window.
+        // `Activator.closeWindow` presses the window's AX close button / posts ⌘W,
+        // which would close the whole browser window. Browser tabs aren't AX
+        // windows, so drive the close through Apple Events, mirroring the activate
+        // path used on commit.
+        if let bt = row.browserTab, let app = row.app, let window = row.window {
+            let tabIndex = bt.index
+            let parentTitle = bt.parentTitle
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = BrowserTabs.closeTab(at: tabIndex, in: app, window: window, title: parentTitle)
+            }
+            // Optimistically drop the closed tab from the per-window cache and
+            // re-expand so the row vanishes immediately; later tabs' indices shift
+            // down naturally because `browserTabRows` re-enumerates the array. The
+            // throttled background re-scan reconciles if the close didn't take.
+            let key = AXRef(element: window)
+            if var titles = browserTabsCache[key], titles.indices.contains(tabIndex) {
+                titles.remove(at: tabIndex)
+                browserTabsCache[key] = titles
+                browserTabsCacheStamp[key] = nil   // force a refresh on next scan
+            }
+            reExpandBrowserTabs(force: true)
+            if baseRows.isEmpty { cancel(); return }
+            scheduleVisibleRefresh(after: 0.25)
+            return
+        }
 
         // Closing a single window is intentionally NOT recorded for "recently
         // closed": that history is app-level only (an app being quit), captured
@@ -2368,7 +2860,7 @@ final class SwitcherController: SwitcherViewDelegate {
             guard gen == revealGeneration, phase == .visible else { return }
             cache.scheduleFullRefresh { [weak self] in
                 guard let self, gen == self.revealGeneration, self.phase == .visible else { return }
-                let fresh = self.filterClosedTombstones(self.cache.rows(orderedBy: self.mru.order))
+                let fresh = self.filterQuitting(self.filterClosedTombstones(self.cache.rows(orderedBy: self.mru.order)))
                 if fresh.isEmpty {
                     self.cancel()
                     return
@@ -2379,9 +2871,16 @@ final class SwitcherController: SwitcherViewDelegate {
                 // reorders rows (MRU bump after close changing focus is the
                 // common trigger), making the next close action hit the wrong
                 // window.
-                self.baseRows = fresh
-                self.baseLabels = RowLabels.labels(for: fresh)
+                //
+                // Re-expand inline browser-tab rows from the warm cache (like
+                // `applyFullSnapshot`) — otherwise this refresh would collapse a
+                // browser window's tabs back to one row (e.g. after closing a tab,
+                // the panel would show just the window until the user re-opened).
+                // Then rescan so a tab added/closed since the cache stamp shows.
+                self.baseRows = self.expandBrowserTabs(fresh)
+                self.baseLabels = RowLabels.labels(for: self.baseRows)
                 self.refreshDisplay()
+                self.scheduleBrowserTabExpansion()
             }
         }
         if delay > 0 {
@@ -2429,6 +2928,17 @@ final class SwitcherController: SwitcherViewDelegate {
     /// hasn't propagated yet. Tombstones self-clear when the cache no longer
     /// reports the window (cache caught up), or after `tombstoneTTL` for
     /// closes that silently fail.
+    /// Drop rows for apps the user just quit (see `quittingPids`) so a refresh
+    /// landing during the quit's death gap doesn't re-add the app as a windowless
+    /// row. Cleared per-pid on terminate or the safety timeout.
+    private func filterQuitting(_ snapshot: [SwitcherRow]) -> [SwitcherRow] {
+        if quittingPids.isEmpty { return snapshot }
+        return snapshot.filter { row in
+            guard let pid = row.pid else { return true }
+            return !quittingPids.contains(pid)
+        }
+    }
+
     private func filterClosedTombstones(_ snapshot: [SwitcherRow]) -> [SwitcherRow] {
         if closedTombstones.isEmpty { return snapshot }
         let now = Date()
@@ -2662,6 +3172,7 @@ final class SwitcherController: SwitcherViewDelegate {
             InstalledAppsIndex.shared.ensureFresh()
         }
         refreshDisplay()
+        resyncSecureInputChords()
     }
 
     private func exitSearch() {
@@ -2670,6 +3181,7 @@ final class SwitcherController: SwitcherViewDelegate {
         searchQuery = ""
         hotkey.setSearchMode(false)
         refreshDisplay()
+        resyncSecureInputChords()
     }
 
     private func handleSearchInput(_ ch: Character) {
