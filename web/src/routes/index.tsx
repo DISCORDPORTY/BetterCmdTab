@@ -40,26 +40,34 @@ const features: Array<[string, string]> = [
   ["Letter-prefix jump", "type a name to jump to it"],
   ["Search & launch", "press / to fuzzy-find, or launch any installed app"],
   ["Window switching", "Cmd+` cycles windows of the front app"],
+  ["Scoped shortcuts", "a global hotkey opens the switcher filtered to all windows, this Space, the current app, or minimized only"],
   ["Tap or hold", "tap to switch instantly, hold to open the switcher"],
   ["Scroll to switch", "spin the mouse wheel to move through apps"],
+  ["Sort order", "order apps by recents, alphabetically, or launch order"],
   ["Recently closed", "reopen an app you just quit"],
   ["Minimized & hidden", "include minimized windows, hidden and windowless apps"],
   ["Pin & filter", "keep favorites up top, hide the rest"],
+  ["Per-app rules", "hide an app, or have it ignore Cmd+Tab always or only when fullscreen"],
   ["Quick actions", "quit, close, minimize, maximize, hide inline"],
+  ["Hover actions", "quick-action buttons appear on hover: close, minimize, zoom, hide, quit, force-quit"],
   ["Force quit", "Cmd+Option+Q SIGKILLs hung apps when graceful Quit hangs"],
   ["Tab drill-in", "press \\ to pick a tab from Safari, Chrome, Arc, Finder, Terminal, …"],
+  ["Tabs as rows", "optionally surface each native or browser tab as its own row, not just behind the \\ peek"],
+  ["Window management", "tile to halves or corners, maximize, or center with Ctrl+Cmd arrows; cycle ½ → ⅔ → ⅓ widths"],
   ["Move windows", "send the highlighted window to the next display"],
-  ["App hotkeys", "assign a shortcut to focus or launch a chosen app"],
+  ["App hotkeys", "assign a global shortcut to focus or launch a chosen app (9 slots)"],
   ["Unread badges", "Dock badge counts, in the switcher"],
   ["Audio indicator", "flags apps playing sound"],
   ["Instant Spaces", "switch Spaces with no animation"],
   ["Current Space only", "show just the windows on the Space you're on"],
+  ["Secure-input survivor", "Cmd+Tab keeps working even while a password field holds Secure Event Input"],
   ["Liquid Glass", "system material on macOS 26"],
-  ["Theming", "panel opacity, corner radius, and a custom accent color"],
+  ["Theming", "panel opacity, corner radius, background material, and a custom accent color"],
   ["Multi-monitor", "opens on the screen under the cursor"],
-  ["Trackpad & haptics", "three-finger swipe to open the switcher or switch Spaces, optional feedback"],
+  ["Trackpad & haptics", "three-finger swipe to open the switcher or switch Spaces, with optional haptic and click feedback"],
   ["Hide from screen sharing", "keep the switcher out of screen recordings and shared screens. Needs macOS 14.6+"],
-  ["Configurable", "custom hotkey, size, scale, layout"],
+  ["Export & import", "back up and move your whole setup as a versioned .cmdtab file"],
+  ["Configurable", "custom hotkey, size, scale, layout, grid columns, and reveal delay"],
 ];
 
 const shortcuts: Array<[string, string]> = [
@@ -78,6 +86,17 @@ const shortcuts: Array<[string, string]> = [
   ["Cmd Option arrows", "Move the highlighted window to the adjacent display"],
   ["Cmd Esc", "Cancel without activating"],
   ["Release Cmd", "Activate the highlighted row"],
+];
+
+const windowShortcuts: Array<[string, string]> = [
+  ["Ctrl Cmd ←", "Tile to the left half"],
+  ["Ctrl Cmd →", "Tile to the right half"],
+  ["Ctrl Cmd [", "Tile to the top-left corner"],
+  ["Ctrl Cmd ]", "Tile to the top-right corner"],
+  ["Ctrl Cmd ;", "Tile to the bottom-left corner"],
+  ["Ctrl Cmd '", "Tile to the bottom-right corner"],
+  ["Ctrl Cmd ↑", "Maximize"],
+  ["Ctrl Cmd ↓", "Center"],
 ];
 
 interface GhAsset {
@@ -425,6 +444,15 @@ export function Home() {
           <Rows rows={shortcuts} combo />
           <motion.p className="muted note" variants={reveal}>
             Hold Cmd, tap to step through, release to activate.
+          </motion.p>
+        </motion.section>
+
+        <motion.section {...inView}>
+          <motion.h2 variants={reveal}>Window management</motion.h2>
+          <Rows rows={windowShortcuts} combo />
+          <motion.p className="muted note" variants={reveal}>
+            Global — fire anywhere, no switcher. Defaults shown, all rebindable. With cycle
+            widths on, press a tile key again to step ½ → ⅔ → ⅓.
           </motion.p>
         </motion.section>
 

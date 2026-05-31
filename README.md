@@ -40,26 +40,34 @@ Fast · Native · Liquid Glass · Zero telemetry · Free forever
 - **Letter-prefix jump** — type a name to jump to it.
 - **Search & launch** — press `/` to fuzzy-find, or launch any installed app.
 - **Window switching** — `` ⌘+ ` `` cycles windows of the front app.
+- **Scoped shortcuts** — a global hotkey that opens the switcher pre-filtered to all windows, the current Space, the current app's windows, or minimized only.
 - **Tap or hold** — tap to switch instantly, hold to open the switcher.
 - **Scroll to switch** — spin the mouse wheel to move through apps.
+- **Sort order** — order apps by recents (MRU), alphabetically, or launch order.
 - **Recently closed** — reopen an app you just quit.
 - **Minimized & hidden** — include minimized windows, hidden and windowless apps.
 - **Pin & filter** — keep favorites up top, hide the rest.
+- **Per-app rules** — hide an app, or have it ignore ⌘Tab always or only when fullscreen.
 - **Quick actions** — quit, close, minimize, maximize, hide inline.
+- **Hover actions** — quick-action buttons appear on hover: close, minimize, zoom, hide, quit, force-quit.
 - **Force quit** — `⌘+⌥+Q` SIGKILLs the highlighted app for when graceful Quit hangs.
 - **Tab drill-in** — press `\` on a row whose window has tabs to pick a specific tab (Safari, Chrome, Arc, Brave, Edge, Vivaldi, Opera, Dia, Finder, Terminal, iTerm).
+- **Tabs as rows** — optionally surface each native or browser tab as its own row, not just behind the `\` peek.
+- **Window management** — tile windows to halves or corners, maximize, or center with `⌃⌘` arrows; press the tile key again to cycle ½ → ⅔ → ⅓ widths.
 - **Move windows** — send the highlighted window to the next display.
-- **App hotkeys** — assign a shortcut to focus or launch a chosen app.
+- **App hotkeys** — assign a global shortcut to focus or launch a chosen app (9 slots).
 - **Unread badges** — Dock badge counts, in the switcher.
 - **Audio indicator** — flags apps playing sound.
 - **Instant Spaces** — switch Spaces with no animation.
 - **Current Space only** — show just the windows on the Space you're on.
+- **Secure-input survivor** — ⌘Tab and window management keep working even while a password field holds Secure Event Input.
 - **Liquid Glass** — system material on macOS 26.
-- **Theming** — panel opacity, corner radius, and a custom accent color.
+- **Theming** — panel opacity, corner radius, background material, and a custom accent color.
 - **Multi-monitor** — opens on the screen under the cursor.
-- **Trackpad & haptics** — three-finger swipe to open the switcher or switch Spaces, optional feedback.
+- **Trackpad & haptics** — three-finger swipe to open the switcher or switch Spaces, with optional haptic and click feedback.
 - **Hide from screen sharing** — keep the switcher out of screen recordings and shared screens. Needs macOS 14.6+.
-- **Configurable** — custom hotkey, size, scale, layout.
+- **Export & import** — back up and move your whole setup as a versioned `.cmdtab` file.
+- **Configurable** — custom hotkey, size, scale, layout, grid columns, and reveal delay.
 
 ## Install
 
@@ -103,7 +111,21 @@ While Cmd is held:
 | `Cmd + Esc` | Cancel switcher without activating anything |
 | `Release Cmd` | Activate the highlighted row |
 
-The `Cmd + Tab` activation hotkey is configurable in Settings; you can also trigger the switcher with a three-finger trackpad swipe. Separately, you can assign a global shortcut per app slot to jump straight to (or launch) a chosen app without opening the switcher.
+### Window management (global — no switcher)
+
+These fire anywhere; defaults shown, all rebindable in Settings → Shortcuts.
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl + Cmd + ←` / `→` | Tile to the left / right half |
+| `Ctrl + Cmd + [` / `]` | Tile to the top-left / top-right corner |
+| `Ctrl + Cmd + ;` / `'` | Tile to the bottom-left / bottom-right corner |
+| `Ctrl + Cmd + ↑` | Maximize |
+| `Ctrl + Cmd + ↓` | Center |
+
+With **cycle tile widths** on, pressing a tile shortcut again steps the window through ½ → ⅔ → ⅓ of the screen.
+
+The `Cmd + Tab` activation hotkey is configurable in Settings; you can also trigger the switcher with a three-finger trackpad swipe. Separately, you can assign a global shortcut per app slot (9 slots) to jump straight to (or launch) a chosen app without opening the switcher, or a **scoped** shortcut that opens the switcher pre-filtered to all windows, the current Space, the current app, or minimized windows.
 
 ## Requirements
 
