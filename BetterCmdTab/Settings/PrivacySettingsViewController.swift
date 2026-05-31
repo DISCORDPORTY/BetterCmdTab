@@ -137,11 +137,23 @@ final class PrivacySettingsViewController: SettingsTabViewController {
 
     private func startAccessibilityPolling() {
         axTimer?.invalidate()
+        // Only the not-yet-granted state can change without re-activating the app
+        // (the user flips the toggle in System Settings while this pane stays up).
+        // Once trusted, stop the poll — `didBecomeActiveNotification` covers any
+        // later revoke-and-return — so we don't wake the main run loop at 1 Hz for
+        // the entire time the pane is parked open.
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.refreshAccessibilityStatus() }
+            Task { @MainActor [weak self] in self?.refreshAndStopIfTrusted() }
         }
         RunLoop.main.add(timer, forMode: .common)
         axTimer = timer
+    }
+
+    /// Refresh the permission badge and, once the permission is granted, stop the
+    /// poll — leaving the steady state driven only by `didBecomeActive`.
+    private func refreshAndStopIfTrusted() {
+        refreshAccessibilityStatus()
+        if AccessibilityCheck.isTrusted { stopAccessibilityPolling() }
     }
 
     private func stopAccessibilityPolling() {

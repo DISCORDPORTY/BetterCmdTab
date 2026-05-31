@@ -22,6 +22,22 @@ struct PreferencesEnumTests {
         #expect(Preferences.clampDelay(150) == 150)
     }
 
+    @MainActor
+    @Test("clampGridColumns / clampRecentlyClosedLimit reject out-of-range imports")
+    func clampGridAndRecentlyClosed() {
+        // A hand-edited / corrupted `.cmdtab` import must not land a negative or
+        // absurd value in these live prefs (other consumers defang it today, but
+        // the contract should hold at the source).
+        #expect(Preferences.clampGridColumns(-5) == Preferences.gridMaxColumnsRange.lowerBound)
+        #expect(Preferences.clampGridColumns(9999) == Preferences.gridMaxColumnsRange.upperBound)
+        #expect(Preferences.clampGridColumns(0) == 0)   // 0 = automatic, valid
+        #expect(Preferences.clampGridColumns(4) == 4)
+
+        #expect(Preferences.clampRecentlyClosedLimit(-1) == Preferences.recentlyClosedLimitRange.lowerBound)
+        #expect(Preferences.clampRecentlyClosedLimit(9999) == Preferences.recentlyClosedLimitRange.upperBound)
+        #expect(Preferences.clampRecentlyClosedLimit(5) == 5)
+    }
+
     @Test("SearchDismissMode round-trips through its raw value")
     func searchDismissModeRawValues() {
         for mode in SearchDismissMode.allCases {

@@ -81,16 +81,31 @@ final class HotkeyTap {
         var windowKey: Int64
     }
 
-    private var tap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    /// Second tap carrying only the pointer events (scroll + mouse-down) that
-    /// the switcher consumes *while open*. Created disabled and toggled by
-    /// `setSwitching`, so a closed switcher routes no scroll/click traffic
-    /// through this process. See `install()`.
-    private var auxTap: CFMachPort?
-    private var auxRunLoopSource: CFRunLoopSource?
-    private var tapThread: Thread?
-    private var tapRunLoop: CFRunLoop?
+    /// The CGEvent-tap lifecycle handles. The tap callback runs on its own
+    /// thread and reads `tap`/`auxTap` (the disabled-tap re-enable path in
+    /// `handle`), while `uninstall()` nils them from the caller thread (main —
+    /// via `reinstallHotkeyTap` on AX re-grant, or `deinit`). `CFRunLoopStop` is
+    /// async, so the callback can be mid-`handle` during the tear-down — an
+    /// unsynchronized read/write data race. Guard every field with the same
+    /// `OSAllocatedUnfairLock` discipline the rest of the cross-thread tap state
+    /// uses. Critical sections stay tiny: copy a ref into a local under the lock,
+    /// release, then touch CGEvent/CFRunLoop on the local — never hold the lock
+    /// across `CFRunLoopRun`/`CFRunLoopStop` or any blocking call. CF ports and
+    /// `Thread` are thread-safe reference types, so `TapPorts` is `@unchecked
+    /// Sendable` (same rationale and annotation as `EventBox`).
+    private struct TapPorts: @unchecked Sendable {
+        var tap: CFMachPort?
+        var runLoopSource: CFRunLoopSource?
+        /// Second tap carrying only the pointer events (scroll + mouse-down) that
+        /// the switcher consumes *while open*. Created disabled and toggled by
+        /// `setSwitching`, so a closed switcher routes no scroll/click traffic
+        /// through this process. See `install()`.
+        var auxTap: CFMachPort?
+        var auxRunLoopSource: CFRunLoopSource?
+        var tapThread: Thread?
+        var tapRunLoop: CFRunLoop?
+    }
+    private let ports = OSAllocatedUnfairLock<TapPorts>(initialState: TapPorts())
     private var layoutObserver: NSObjectProtocol?
 
     private let switchingFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
@@ -248,9 +263,12 @@ final class HotkeyTap {
 
         let src = CFMachPortCreateRunLoopSource(nil, port, 0)
         // Publish tap/source before starting the worker so the callback's
-        // re-enable path sees them on first dispatch.
-        tap = port
-        runLoopSource = src
+        // re-enable path sees them on first dispatch. Lock only around the
+        // assignment; `tapEnable` runs on the local `port` outside the lock.
+        ports.withLock {
+            $0.tap = port
+            $0.runLoopSource = src
+        }
         CGEvent.tapEnable(tap: port, enable: true)
 
         // The pointer tap shares the same callback (`handle` dispatches by
@@ -266,8 +284,10 @@ final class HotkeyTap {
             userInfo: opaqueSelf
         ) {
             let s = CFMachPortCreateRunLoopSource(nil, auxPort, 0)
-            auxTap = auxPort
-            auxRunLoopSource = s
+            ports.withLock {
+                $0.auxTap = auxPort
+                $0.auxRunLoopSource = s
+            }
             auxSrc = s
             CGEvent.tapEnable(tap: auxPort, enable: false)
         } else {
@@ -288,7 +308,7 @@ final class HotkeyTap {
             let loop = CFRunLoopGetCurrent()!
             CFRunLoopAddSource(loop, src, .commonModes)
             if let capturedAuxSrc { CFRunLoopAddSource(loop, capturedAuxSrc, .commonModes) }
-            self?.tapRunLoop = loop
+            self?.ports.withLock { $0.tapRunLoop = loop }
             started.signal()
             CFRunLoopRun()
         }
@@ -296,7 +316,10 @@ final class HotkeyTap {
         thread.qualityOfService = .userInteractive
         thread.start()
         started.wait()
-        tapThread = thread
+        // `withLockUnchecked`: the closure captures the non-Sendable `Thread`,
+        // which the `@Sendable`-bodied `withLock` would warn on (and reject in
+        // Swift 6). The store is still serialized by the same lock.
+        ports.withLockUnchecked { $0.tapThread = thread }
 
         loadKeyboardLayout()
         let nc = DistributedNotificationCenter.default()
@@ -308,27 +331,32 @@ final class HotkeyTap {
     }
 
     func uninstall() {
-        if let tap {
+        // Snapshot the handles under the lock, then nil them out in the SAME
+        // critical section so the callback thread never observes a torn state.
+        // Every CGEvent/CFRunLoop call below runs on the locals outside the lock
+        // — `CFRunLoopStop` is async and must never be held across the lock.
+        // `TapPorts` is `@unchecked Sendable`, so the checked `withLock` accepts
+        // returning the snapshot.
+        let snapshot = ports.withLock { current -> TapPorts in
+            let copy = current
+            current = TapPorts()
+            return copy
+        }
+        if let tap = snapshot.tap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
-        if let auxTap {
+        if let auxTap = snapshot.auxTap {
             CGEvent.tapEnable(tap: auxTap, enable: false)
         }
-        if let loop = tapRunLoop {
-            if let runLoopSource {
+        if let loop = snapshot.tapRunLoop {
+            if let runLoopSource = snapshot.runLoopSource {
                 CFRunLoopRemoveSource(loop, runLoopSource, .commonModes)
             }
-            if let auxRunLoopSource {
+            if let auxRunLoopSource = snapshot.auxRunLoopSource {
                 CFRunLoopRemoveSource(loop, auxRunLoopSource, .commonModes)
             }
             CFRunLoopStop(loop)
         }
-        tap = nil
-        runLoopSource = nil
-        auxTap = nil
-        auxRunLoopSource = nil
-        tapRunLoop = nil
-        tapThread = nil
         if let obs = layoutObserver {
             DistributedNotificationCenter.default().removeObserver(obs)
             layoutObserver = nil
@@ -348,6 +376,7 @@ final class HotkeyTap {
         // live exactly for that window so idle scroll/click traffic never
         // enters this process. Safe to call from main: `tapEnable` just toggles
         // a flag in the WindowServer for the mach port.
+        let auxTap = ports.withLockUnchecked { $0.auxTap }
         if let auxTap {
             CGEvent.tapEnable(tap: auxTap, enable: value)
         }
@@ -497,6 +526,10 @@ final class HotkeyTap {
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // Copy the ports into locals under the lock, release, then re-enable
+            // on the locals — the strong `let`s keep them alive across the call
+            // even if `uninstall()` nils the shared state concurrently.
+            let (tap, auxTap) = ports.withLockUnchecked { ($0.tap, $0.auxTap) }
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             // Re-arm the pointer tap only if it should currently be live (i.e.
             // the switcher is open); otherwise it stays disabled as intended.

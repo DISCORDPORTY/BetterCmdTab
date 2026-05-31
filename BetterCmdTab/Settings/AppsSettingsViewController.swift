@@ -116,11 +116,16 @@ final class AppsSettingsViewController: SettingsTabViewController {
     }
 
     private func makeRow(for exception: AppException) -> AppRuleRowView {
-        let info = Self.appInfo(for: exception.bundleID)
+        // Build immediately with a placeholder (the bundle ID + a generic app
+        // glyph), then resolve the real name + icon off the main actor — the
+        // LaunchServices lookup and disk icon read in `appInfo(for:)` can hitch
+        // the UI with many rules or a cold LaunchServices. Mirrors the off-main
+        // resolution in `AppsPickerSheetViewController.loadApps`.
+        let placeholderIcon = NSImage(systemSymbolName: "app.dashed", accessibilityDescription: nil) ?? NSImage()
         let row = AppRuleRowView(
             bundleID: exception.bundleID,
-            name: info.name,
-            icon: info.icon,
+            name: exception.bundleID,
+            icon: placeholderIcon,
             hide: exception.hide,
             ignore: exception.ignore,
             showOptions: showOptions,
@@ -132,6 +137,12 @@ final class AppsSettingsViewController: SettingsTabViewController {
         }
         row.onRemove = { [weak self] in
             self?.removeRule(bundleID: bundleID)
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak row] in
+            let info = Self.appInfo(for: bundleID)
+            DispatchQueue.main.async { [weak row] in
+                row?.applyResolved(name: info.name, icon: info.icon)
+            }
         }
         return row
     }
@@ -178,6 +189,15 @@ final class AppsSettingsViewController: SettingsTabViewController {
 
     override func viewWillAppear() {
         super.viewWillAppear()
+        // Re-sync the working copy: another pane (e.g. Import settings) can rewrite
+        // appExceptions while this cached controller is off screen. Without this,
+        // the next add/edit/remove would persist this stale snapshot and silently
+        // clobber the imported rules.
+        let current = Preferences.shared.appExceptions
+        if current != exceptions {
+            exceptions = current
+            rebuildRulesCard()
+        }
         updatePinnedCount()
         Preferences.shared.$pinnedBundleIDs
             .receive(on: DispatchQueue.main)
@@ -224,7 +244,10 @@ final class AppsSettingsViewController: SettingsTabViewController {
     // MARK: - Helpers
 
     /// Display name + icon for a bundle ID, resolved from the installed app.
-    private static func appInfo(for bundleID: String) -> (name: String, icon: NSImage) {
+    /// `nonisolated` so it can run off the main actor: it only touches
+    /// `NSWorkspace.shared`, whose `urlForApplication`/`icon(forFile:)` are
+    /// thread-safe, plus an `NSImage` symbol lookup.
+    nonisolated private static func appInfo(for bundleID: String) -> (name: String, icon: NSImage) {
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
             return (url.deletingPathExtension().lastPathComponent, NSWorkspace.shared.icon(forFile: url.path))
         }

@@ -109,6 +109,11 @@ final class SwitcherController: SwitcherViewDelegate {
     /// live hold modifier + the search/drill mode, re-synced from the poller and
     /// the search/drill transitions, so `stickyOpen` needs no `didSet` here.)
     private var stickyOpen = false
+    /// `stickyOpen` snapshotted at drill entry so exiting the drill (e.g. the
+    /// `\` toggle while ⌘ is still held) restores the pre-drill detach state
+    /// instead of leaving `applyDrill`'s forced `stickyOpen = true` set — which
+    /// would strand the panel open because the modifier release no longer commits.
+    private var stickyOpenBeforeDrill = false
     /// Browser tab drill-in state. While `tabDrillActive`, nav keys (Cmd+Tab,
     /// Cmd+Left/Right, arrows) step `tabIndex` inside the highlighted row's
     /// `tabs` array instead of changing the app selection. Reset on every row
@@ -1395,9 +1400,13 @@ final class SwitcherController: SwitcherViewDelegate {
             guard let front = NSWorkspace.shared.frontmostApplication,
                   front.processIdentifier != selfPid else { return }
             // Promote the truly-current window of the front app to MRU[0]
-            // before we freeze the snapshot. Catches manual clicks the user
-            // made between Cmd+` chords that our own activations did not see.
-            windowMRU.syncFrontWindow(pid: front.processIdentifier)
+            // before reveal() freezes the snapshot. Catches manual clicks the
+            // user made between Cmd+` chords that our own activations did not
+            // see. Resolved off-main (the AX query can stall on an unresponsive
+            // app — never block the main run loop here): the bump is not consumed
+            // synchronously below (the snapshot is sorted later, on the reveal
+            // timer), so it can land asynchronously and still order this chord.
+            handleFocusChange(pid: front.processIdentifier)
             windowsOnlyMode = true
             windowsOnlyPid = front.processIdentifier
             windowsOnlyPrimedDelta = delta
@@ -2469,6 +2478,9 @@ final class SwitcherController: SwitcherViewDelegate {
     /// Apply a fetched/cached tab set to the panel — single sink used by
     /// both the cache-hit and async paths so they can't drift.
     private func applyDrill(titles: [String], liveTabs: [AXUIElement], backend: TabDrillBackend, window: AXUIElement) {
+        // Snapshot the detach state on first entry only (a re-drill onto another
+        // row must keep the original pre-drill value, not the forced `true`).
+        if !tabDrillActive { stickyOpenBeforeDrill = stickyOpen }
         tabTitles = titles
         liveTabElements = liveTabs
         tabDrillBackend = backend
@@ -2594,6 +2606,9 @@ final class SwitcherController: SwitcherViewDelegate {
         liveTabElements = []
         tabIndex = 0
         drillWindow = nil
+        // Restore the pre-drill detach state so a `\`-toggle exit while ⌘ is held
+        // re-arms commit-on-release; mouse-park / stay-open-search keep their sticky.
+        stickyOpen = stickyOpenBeforeDrill
         hotkey.setTabDrillActive(false)
         refreshDisplay()
         resyncSecureInputChords()

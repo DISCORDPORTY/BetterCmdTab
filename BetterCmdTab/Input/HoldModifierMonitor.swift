@@ -28,6 +28,17 @@ final class HoldModifierMonitor {
     private var mask: CGEventFlags = .maskCommand
     private var timer: Timer?
 
+    /// Tight cadence while the modifier is held, so the commit-on-release edge
+    /// stays low-latency.
+    private static let heldInterval: TimeInterval = 0.03
+    /// Relaxed cadence once released: the panel can stay parked open for an
+    /// unbounded time (sticky / stay-open) and we only need to notice the *next*
+    /// re-press, so a far slower poll avoids a permanent 33 Hz main-thread wake.
+    private static let releasedInterval: TimeInterval = 0.25
+    /// Interval the live timer is currently scheduled at, so `poll` only tears it
+    /// down and rebuilds it on an actual cadence change.
+    private var currentInterval: TimeInterval = HoldModifierMonitor.heldInterval
+
     /// Pure: did the modifier go from held to released?
     static func modifierReleased(previous: Bool, current: Bool) -> Bool {
         previous && !current
@@ -47,7 +58,18 @@ final class HoldModifierMonitor {
         self.mask = mask
         isHeld = assumeHeld
         guard timer == nil else { return }
-        let t = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
+        // Seed the cadence from the seeded state: a panel opened by a held trigger
+        // (`assumeHeld == true`) starts at the tight interval so the *first*
+        // release is still caught at 30 ms.
+        schedule(interval: assumeHeld ? Self.heldInterval : Self.releasedInterval)
+    }
+
+    /// (Re)build the poll timer at `interval`, preserving the weak callback and
+    /// `.common` run-loop mode. Replaces any existing timer.
+    private func schedule(interval: TimeInterval) {
+        timer?.invalidate()
+        currentInterval = interval
+        let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.poll()
         }
         RunLoop.main.add(t, forMode: .common)
@@ -70,6 +92,15 @@ final class HoldModifierMonitor {
         guard now != isHeld else { return }
         let wasHeld = isHeld
         isHeld = now
+        // Held → released: drop to the slow cadence; released → held: restore the
+        // tight one for the next commit-on-release. Reschedule before firing the
+        // callbacks, so the new interval is live regardless of whether
+        // onHoldChange/onRelease tear the monitor down (stop() then invalidates the
+        // just-built timer harmlessly).
+        let wanted = now ? Self.heldInterval : Self.releasedInterval
+        if wanted != currentInterval {
+            schedule(interval: wanted)
+        }
         onHoldChange(now)
         if Self.modifierReleased(previous: wasHeld, current: now) {
             onRelease()

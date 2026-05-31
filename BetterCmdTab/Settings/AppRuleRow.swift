@@ -22,6 +22,15 @@ final class AppRuleRowView: NSView {
 
     private let showPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let shortcutPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let iconView = NSImageView()
+    private let nameLabel = NSTextField(labelWithString: "")
+
+    /// Splice in the name + icon resolved off the main actor (see
+    /// `AppsSettingsViewController.makeRow(for:)`). Called on the main actor.
+    func applyResolved(name: String, icon: NSImage) {
+        nameLabel.stringValue = name
+        iconView.image = icon
+    }
 
     init(
         bundleID: String,
@@ -45,13 +54,12 @@ final class AppRuleRowView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
 
     private func build(name: String, icon: NSImage) {
-        let iconView = NSImageView()
         iconView.image = icon
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
-        let nameLabel = NSTextField(labelWithString: name)
+        nameLabel.stringValue = name
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = .labelColor
         nameLabel.lineBreakMode = .byTruncatingTail

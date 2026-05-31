@@ -235,6 +235,16 @@ final class AppearanceSettingsViewController: SettingsTabViewController {
     override func viewWillDisappear() {
         super.viewWillDisappear()
         cancellables.removeAll()
+        // The shared color panel keeps a non-zeroing target/action. The settings
+        // window is `.releaseOnClose`, so leaving this wired would let a later
+        // color change message a deallocated controller (EXC_BAD_ACCESS). Detach
+        // ourselves whenever we own the panel (NSColorPanel exposes no target
+        // getter, so we track ownership explicitly).
+        if ownsColorPanel {
+            NSColorPanel.shared.setTarget(nil)
+            NSColorPanel.shared.setAction(nil)
+            ownsColorPanel = false
+        }
     }
 
     private func syncFromPreferences() {
@@ -317,6 +327,10 @@ final class AppearanceSettingsViewController: SettingsTabViewController {
 
     // MARK: - Custom accent color
 
+    /// Tracks whether we currently own the shared color panel's target/action,
+    /// so `viewWillDisappear` can detach before this controller is released.
+    private var ownsColorPanel = false
+
     private func presentColorPanel() {
         let panel = NSColorPanel.shared
         panel.showsAlpha = false
@@ -325,6 +339,7 @@ final class AppearanceSettingsViewController: SettingsTabViewController {
         }
         panel.setTarget(self)
         panel.setAction(#selector(customColorChanged(_:)))
+        ownsColorPanel = true
         panel.orderFront(nil)
     }
 

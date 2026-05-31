@@ -354,6 +354,13 @@ final class Preferences: ObservableObject {
     /// user pins an explicit radius in points.
     static let panelCornerRadiusRange: ClosedRange<Int> = 0...40
 
+    /// Grid layout column cap. `0` = automatic (width-driven); above that the
+    /// user pins an explicit count. Bounded so a hand-edited/corrupted import
+    /// can't land a negative or absurd value in the live pref.
+    static let gridMaxColumnsRange: ClosedRange<Int> = 0...12
+    /// Upper bound on recently-closed entries surfaced in search. `0` disables.
+    static let recentlyClosedLimitRange: ClosedRange<Int> = 0...50
+
     /// Number of direct-activation hotkey slots. Each slot binds a recorded
     /// shortcut (stored by BetterShortcuts) to a target app bundle ID.
     static let directActivationSlotCount = 9
@@ -494,6 +501,11 @@ final class Preferences: ObservableObject {
     /// Maximum columns in Grid layout. `0` = automatic (width-driven).
     @Published var gridMaxColumns: Int {
         didSet {
+            let clamped = Self.clampGridColumns(gridMaxColumns)
+            if clamped != gridMaxColumns {
+                gridMaxColumns = clamped
+                return
+            }
             guard oldValue != gridMaxColumns else { return }
             UserDefaults.standard.set(gridMaxColumns, forKey: Keys.gridMaxColumns)
         }
@@ -596,6 +608,11 @@ final class Preferences: ObservableObject {
     /// How many recently closed entries to surface in search at most. Default 5.
     @Published var recentlyClosedLimit: Int {
         didSet {
+            let clamped = Self.clampRecentlyClosedLimit(recentlyClosedLimit)
+            if clamped != recentlyClosedLimit {
+                recentlyClosedLimit = clamped
+                return
+            }
             guard oldValue != recentlyClosedLimit else { return }
             UserDefaults.standard.set(recentlyClosedLimit, forKey: Keys.recentlyClosedLimit)
         }
@@ -959,6 +976,14 @@ final class Preferences: ObservableObject {
 
     static func clampCornerRadius(_ value: Int) -> Int {
         min(panelCornerRadiusRange.upperBound, max(panelCornerRadiusRange.lowerBound, value))
+    }
+
+    static func clampGridColumns(_ value: Int) -> Int {
+        min(gridMaxColumnsRange.upperBound, max(gridMaxColumnsRange.lowerBound, value))
+    }
+
+    static func clampRecentlyClosedLimit(_ value: Int) -> Int {
+        min(recentlyClosedLimitRange.upperBound, max(recentlyClosedLimitRange.lowerBound, value))
     }
 
     /// Pads/truncates to exactly `directActivationSlotCount` entries.

@@ -59,9 +59,13 @@ final class SwipeTrigger {
     }
 
     func setOneShot(_ oneShot: Bool) {
+        // Only the scalar `oneShot` flag is written from the main actor (same
+        // single-assignment, set-rarely contract as `reverse`/`commitOnRelease`).
+        // The RMW latch fields `fired`/`accumulator` are owned solely by the
+        // callback thread, which clears them on full lift and re-anchors them on
+        // gesture start — writing them here would be a data race against that
+        // thread's `+=`/`-=`/toggle, so we deliberately don't.
         MTGesture.oneShot = oneShot
-        MTGesture.fired = false
-        MTGesture.accumulator = 0
     }
 
     private func install() {

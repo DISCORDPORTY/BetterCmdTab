@@ -13,14 +13,27 @@ import Foundation
 /// unconditional startup self-heal in `SwitcherController.start()`, which clears
 /// any stale disable on the next launch.
 ///
-/// The handler path is deliberately minimal: it only reads a pre-allocated C
-/// buffer and calls a dlsym'd C function pointer, so it allocates nothing and
-/// touches no Swift heap that would be unsafe from a signal context. Only the
-/// graceful termination signals are hooked (SIGTERM/SIGINT/SIGHUP) — crash
-/// signals (SIGSEGV/SIGBUS/...) are intentionally left to the OS crash reporter,
-/// and the process state during a crash is too suspect to risk a WindowServer
-/// IPC anyway. Crashes are instead healed on the next launch by
-/// `SwitcherController`.
+/// Restore contract by context:
+/// - **Clean exit** (`exit`/return from `main`): the `atexit` hook runs in a
+///   normal thread context and performs the WindowServer IPC to re-enable the
+///   keys synchronously — ⌘Tab is live again immediately.
+/// - **In-session signal** (SIGTERM/SIGINT/SIGHUP, e.g. `kill -TERM`): the
+///   handler does **not** call back into the WindowServer. That IPC
+///   (`CGSSetSymbolicHotKeyEnabled` → synchronous mach/XPC to the WindowServer)
+///   is not async-signal-safe: if the signal interrupts a thread holding a CGS
+///   lock or mid-allocation, the in-handler IPC can deadlock the quit path. So
+///   the handler only re-raises with the default disposition (`SA_RESETHAND`)
+///   to let termination proceed. The disabled set was already persisted to
+///   UserDefaults on every change (`persistDisabledSymbolicKeys`), so native
+///   ⌘Tab is re-enabled by the unconditional `healStaleSymbolicHotkeyDisable()`
+///   on the next launch — not in the handler.
+/// - **Crash** (SIGSEGV/SIGBUS/...) and **SIGKILL**/power loss: not caught at
+///   all; healed by the same next-launch self-heal.
+///
+/// Because this is a launch-at-login menu-bar app, "next launch" is normally
+/// imminent. The trade-off is that a `kill -TERM` (or any in-session signal)
+/// leaves native ⌘Tab disabled until that next launch rather than restoring it
+/// in the handler.
 enum SymbolicHotkeyGuard {
     /// Max managed keys: ⌘Tab, ⌘⇧Tab, ⌘`. A `0` slot means "empty".
     private static let capacity = 3
@@ -58,7 +71,10 @@ enum SymbolicHotkeyGuard {
         }
     }
 
-    /// Re-enable every recorded slot. Async-signal best-effort.
+    /// Re-enable every recorded slot via the WindowServer IPC. **Normal context
+    /// only** — this is the `atexit` path. It is *not* async-signal-safe (the IPC
+    /// can block on a CGS lock) and must never be called from a signal handler;
+    /// signal-context restoration is delegated to the next-launch self-heal.
     private static func restore() {
         guard let fn = setEnabledFn else { return }
         for i in 0..<capacity where slots[i] != 0 {
@@ -82,9 +98,13 @@ enum SymbolicHotkeyGuard {
         // disposition before the handler runs, so the trailing `raise` performs
         // the normal action (terminate) — without it the signal would be
         // swallowed and the process would keep running.
+        // The handler does the minimum async-signal-safe work: re-raise so the
+        // (now-default, thanks to SA_RESETHAND) disposition terminates the
+        // process. It deliberately does NOT call `restore()` — that IPC is not
+        // async-signal-safe; in-session signal cases rely on the next-launch
+        // `healStaleSymbolicHotkeyDisable()` instead.
         var action = sigaction()
         action.__sigaction_u.__sa_handler = { sig in
-            SymbolicHotkeyGuard.restore()
             raise(sig)
         }
         sigemptyset(&action.sa_mask)

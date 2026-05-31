@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Darwin
 import Foundation
+import os
 
 // Private SPI from libsystem: detaches the spawned child's TCC
 // "responsibility" so it acts as its own client (osascript) instead of
@@ -141,6 +142,12 @@ enum BrowserTabs {
         posix_spawn_file_actions_adddup2(&actions, errFd, 2)
         posix_spawn_file_actions_addclose(&actions, outFd)
         posix_spawn_file_actions_addclose(&actions, errFd)
+        // Also close the parent-side *read* ends in the child so the spawned
+        // osascript doesn't inherit two stray descriptors (Foundation's `Pipe`
+        // does not set FD_CLOEXEC). Harmless to the EOF protocol, which depends
+        // only on the write ends.
+        posix_spawn_file_actions_addclose(&actions, outPipe.fileHandleForReading.fileDescriptor)
+        posix_spawn_file_actions_addclose(&actions, errPipe.fileHandleForReading.fileDescriptor)
 
         let path = "/usr/bin/osascript"
         let args: [String] = ["osascript", "-e", source]
@@ -152,10 +159,21 @@ enum BrowserTabs {
             posix_spawn(&pid, cPath, &actions, &attrs, cArgs, environ)
         }
         guard status == 0 else {
-            NSLog("BrowserTabs: posix_spawn osascript failed \(status)")
+            Log.activator.error("BrowserTabs: posix_spawn osascript failed \(status)")
             return nil
         }
         closeParentWriteEnds()
+
+        // Hard wall-clock watchdog, independent of the AppleScript `with timeout`
+        // (which only bounds Apple Event *dispatch*, not the osascript process).
+        // A wedged browser — or a child that stalls before the event dispatches —
+        // would otherwise block this worker thread on `readDataToEndOfFile` /
+        // `waitpid` indefinitely and leak a zombie. After the deadline we SIGKILL
+        // the child so the pipe reads hit EOF and `waitpid` reaps it. Cancelled on
+        // the normal path.
+        let watchdog = DispatchWorkItem { kill(pid, SIGKILL) }
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 8.0, execute: watchdog)
+        defer { watchdog.cancel() }
 
         // Drain stdout and stderr to EOF *before* reaping. `readDataToEndOfFile`
         // returns only once the child closes its write ends (i.e. exits), and a
@@ -182,7 +200,7 @@ enum BrowserTabs {
         let stdout = String(data: outData, encoding: .utf8) ?? ""
         let stderr = String(data: errData, encoding: .utf8) ?? ""
         if exitCode != 0 || !stderr.isEmpty {
-            NSLog("BrowserTabs: osascript exit=\(exitCode) stderr=\(stderr)")
+            Log.activator.error("BrowserTabs: osascript exit=\(exitCode) stderr=\(stderr)")
         }
         if exitCode != 0 { return nil }
         return stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -208,8 +226,14 @@ enum BrowserTabs {
     /// entry never appears in System Settings → Privacy → Automation. The
     /// caller is expected to be the Settings window's "Browser tab drill-in"
     /// toggle, which provides exactly that foreground context.
+    /// Guards `requestPermissionForRunningBrowsers` so rapid toggles / re-opens of
+    /// the Settings switch don't pile up overlapping blocking workers (each one
+    /// serially round-trips every running browser).
+    @MainActor private static var permissionRequestInFlight = false
+
     @MainActor
     static func requestPermissionForRunningBrowsers() {
+        guard !permissionRequestInFlight else { return }
         // Force ourselves to the foreground so TCC has a window context.
         NSApp.activate(ignoringOtherApps: true)
         var prompted: Set<String> = []
@@ -221,6 +245,7 @@ enum BrowserTabs {
             bundleIDs.append(bid)
         }
         guard !bundleIDs.isEmpty else { return }
+        permissionRequestInFlight = true
         // Each runScript is a blocking waitpid; doing this on the main thread
         // froze the UI for the full per-browser round-trip (multi-second on
         // installs with several browsers running).
@@ -235,9 +260,10 @@ enum BrowserTabs {
                     end timeout
                 end tell
                 """
-                NSLog("BrowserTabs: requesting permission for \(bid)")
+                Log.activator.debug("BrowserTabs: requesting permission for \(bid)")
                 _ = runScript(source)
             }
+            Task { @MainActor in permissionRequestInFlight = false }
         }
     }
 
@@ -264,7 +290,7 @@ enum BrowserTabs {
             true  // askUserIfNeeded — surfaces the TCC prompt
         )
         if permission != noErr {
-            NSLog("BrowserTabs: AEDeterminePermissionToAutomateTarget \(bundleID) → \(permission)")
+            Log.activator.error("BrowserTabs: AEDeterminePermissionToAutomateTarget \(bundleID) → \(permission)")
         }
         return permission == noErr
     }
@@ -324,7 +350,7 @@ enum BrowserTabs {
             } else {
                 // Script errored (permission/timeout) — don't double-spawn the
                 // raise path, just report the failure.
-                NSLog("BrowserTabs: tabTitles \(bid) match script failed (permission/timeout?)")
+                Log.activator.error("BrowserTabs: tabTitles \(bid) match script failed (permission/timeout?)")
                 return .failed
             }
         }
@@ -344,7 +370,7 @@ enum BrowserTabs {
         return theList as text
         """
         guard let raw = runScript(source) else {
-            NSLog("BrowserTabs: tabTitles \(bid) failed (permission/timeout?)")
+            Log.activator.error("BrowserTabs: tabTitles \(bid) failed (permission/timeout?)")
             return .failed
         }
         let titles = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
@@ -399,7 +425,7 @@ enum BrowserTabs {
         end tell
         """
         guard let raw = runScript(source) else {
-            NSLog("BrowserTabs: allWindowTabs \(bid) failed (permission/timeout?)")
+            Log.activator.error("BrowserTabs: allWindowTabs \(bid) failed (permission/timeout?)")
             return []
         }
         if raw == "NOWINDOWS" || raw.isEmpty { return [] }
