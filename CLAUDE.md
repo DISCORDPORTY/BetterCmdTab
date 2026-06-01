@@ -1,7 +1,16 @@
+## Project priority — performance first
+
+Performance, optimization, and minimal resource usage are the top priority for every change
+in this project. It is a ⌘Tab hot-path app: prefer the solution that uses the least CPU,
+memory, and energy, keep work off the main thread (or measure it), avoid allocations and
+polling on hot paths, and don't add a dependency or background task when a lighter approach
+works. When two designs are equally correct, ship the cheaper one.
+
 ## Tooling policy — reach for caveman first
 
-Default tool-selection order for every task. Only fall back to a lower tier when the
-preferred tool structurally can't do the job (not merely because it feels faster).
+Always use caveman tooling whenever the job fits — it is the first choice, not a fallback.
+Only drop to a lower tier when the caveman tool structurally can't do the job (not merely
+because it feels faster).
 
 1. **cavecrew subagents** over inline reading/editing/reviewing and over vanilla
    `Explore`/`Agent`. Their output is caveman-compressed (~60% smaller back into main
@@ -18,6 +27,11 @@ preferred tool structurally can't do the job (not merely because it feels faster
    `general-purpose` Agent only when the tiers above can't cover the work — e.g. a
    cross-file (3+) refactor that `cavecrew-builder` refuses, a new feature spanning many
    files, or multi-step research no single cavecrew role handles.
+
+**rtk** (Rust Token Killer) is separate from the caveman tiers: use it only on **large
+tasks** where a command's output is big enough that token compression pays off (big logs,
+wide `git`/build output, full-tree listings). Run ordinary small commands directly. Meta
+commands (`rtk gain`, `rtk discover`) stay as-is.
 
 Caveman *response mode* is active this session (terse output). Keep code, commits, PRs,
 and security/irreversible-action notes in normal prose.
