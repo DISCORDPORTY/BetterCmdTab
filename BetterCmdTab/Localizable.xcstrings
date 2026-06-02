@@ -57,30 +57,30 @@
         }
       }
     },
-    "Hide all windows hides every app except Finder. Pick apps to keep visible." : {
+    "Hide all windows hides every app, Finder included. Pick apps to keep visible." : {
       "localizations" : {
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "„Alle Fenster ausblenden“ blendet jede App außer dem Finder aus. Wähle Apps, die sichtbar bleiben."
+            "value" : "„Alle Fenster ausblenden“ blendet jede App aus, auch den Finder. Wähle Apps, die sichtbar bleiben."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "«Ocultar todas las ventanas» oculta todas las apps excepto el Finder. Elige apps que permanezcan visibles."
+            "value" : "«Ocultar todas las ventanas» oculta todas las apps, incluido el Finder. Elige apps que permanezcan visibles."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "« Masquer toutes les fenêtres » masque toutes les apps sauf le Finder. Choisissez les apps à garder visibles."
+            "value" : "« Masquer toutes les fenêtres » masque toutes les apps, Finder compris. Choisissez les apps à garder visibles."
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "„Ukryj wszystkie okna” ukrywa każdą aplikację oprócz Findera. Wybierz aplikacje, które mają pozostać widoczne."
+            "value" : "„Ukryj wszystkie okna” ukrywa każdą aplikację, łącznie z Finderem. Wybierz aplikacje, które mają pozostać widoczne."
           }
         }
       }

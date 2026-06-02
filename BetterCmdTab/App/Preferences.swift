@@ -539,8 +539,8 @@ final class Preferences: ObservableObject {
 
     /// Bundle identifiers the "Hide all windows" shortcut skips, so chosen apps
     /// stay visible while everything else is hidden. Empty by default (hide-all
-    /// covers every app except Finder, which is never hidden — it's the macOS
-    /// active-app fallback / desktop owner; see `Activator.hideAllApps`).
+    /// covers every app, Finder included — add Finder here to keep it visible as
+    /// the desktop owner; see `Activator.hideAllApps`).
     @Published var hideAllExcludedBundleIDs: [String] {
         didSet {
             guard oldValue != hideAllExcludedBundleIDs else { return }

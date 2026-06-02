@@ -555,48 +555,73 @@ enum Activator {
     }
 
     /// Hide every regular (Dock-presence) app, clearing the screen to the desktop.
-    /// A single, idempotent action — NOT a toggle. Apps the user chose to keep
-    /// visible are skipped (read straight from `UserDefaults`; key mirrors
+    /// A single, idempotent action — NOT a toggle. Apps the user added to "Keep
+    /// apps visible" are skipped (read straight from `UserDefaults`; key mirrors
     /// `Preferences.Keys.hideAllExcludedBundleIDs`, so the two must stay in sync).
     ///
-    /// Finder is deliberately never hidden. macOS requires one app to stay active
-    /// and falls back to Finder; if we hide Finder (or whichever app is the last
-    /// one visible), the system immediately UN-hides another app to keep one
-    /// active — which looked like a toggle, left "one app always visible", and
-    /// broke the hide → show → hide cycle. Leaving Finder as the desktop owner
-    /// means the system never needs to un-hide anything: hiding all other apps is
-    /// stable and re-running it is a no-op (nothing left to hide).
+    /// Other apps are hidden with `.hide()`, background first (occluded — no flash,
+    /// no focus change) then the frontmost last, so only one transition shows.
     ///
-    /// Frontmost app is hidden last: hiding a background (occluded) app is
-    /// invisible and doesn't change focus, so only the frontmost's hide shows —
-    /// one clean transition to the desktop.
+    /// Finder is handled differently. It can't be hidden with `.hide()`: macOS
+    /// keeps one app active and falls back to Finder, so hiding it just makes the
+    /// system re-promote (un-hide) it — that read as a toggle and left its window
+    /// on screen. Instead we MINIMIZE Finder's windows via Accessibility (already
+    /// granted), clearing them from the desktop while Finder stays the active
+    /// desktop owner — no toggle. Skipped when the user excluded Finder.
+    /// `showAllApps()` un-minimizes them again.
     static func hideAllApps() {
         let excluded = Set(UserDefaults.standard.stringArray(forKey: "Switcher.hideAllExcludedBundleIDs") ?? [])
         let selfPid = getpid()
         let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let targets = NSWorkspace.shared.runningApplications.filter { app in
+        let running = NSWorkspace.shared.runningApplications
+        let targets = running.filter { app in
             app.activationPolicy == .regular
                 && app.processIdentifier != selfPid
                 && app.bundleIdentifier != finderBundleID
                 && !app.isHidden
                 && !(app.bundleIdentifier.map(excluded.contains) ?? false)
         }
-        func order(_ app: NSRunningApplication) -> Int {
-            app.processIdentifier == frontPid ? 1 : 0   // frontmost hidden last
-        }
-        for app in targets.sorted(by: { order($0) < order($1) }) {
+        // frontmost hidden last (its hide is the only visible transition).
+        for app in targets.sorted(by: { ($1.processIdentifier == frontPid ? 1 : 0) > ($0.processIdentifier == frontPid ? 1 : 0) }) {
             app.hide()
+        }
+        if !excluded.contains(finderBundleID),
+           let finderPid = running.first(where: { $0.bundleIdentifier == finderBundleID })?.processIdentifier {
+            DispatchQueue.global(qos: .userInitiated).async {
+                setFinderWindowsMinimized(true, pid: finderPid)
+            }
         }
     }
 
     /// Unhide every regular app currently hidden (by `hideAllApps()` or a manual
-    /// ⌘H). Deliberately does NOT activate them — unhiding many apps and
+    /// ⌘H) and un-minimize Finder's windows (the counterpart to hideAllApps()'s
+    /// Finder minimize). Deliberately does NOT activate the unhidden apps —
     /// activating each would thrash focus; the frontmost app stays put and the
     /// rest simply reappear. Stateless, so it pairs with any hide source.
     static func showAllApps() {
-        for app in NSWorkspace.shared.runningApplications
-        where app.activationPolicy == .regular && app.isHidden {
+        let running = NSWorkspace.shared.runningApplications
+        for app in running where app.activationPolicy == .regular && app.isHidden {
             app.unhide()
+        }
+        if let finderPid = running.first(where: { $0.bundleIdentifier == finderBundleID })?.processIdentifier {
+            DispatchQueue.global(qos: .userInitiated).async {
+                setFinderWindowsMinimized(false, pid: finderPid)
+            }
+        }
+    }
+
+    /// Set the minimized state of every window of `pid` (used for Finder, which
+    /// can't be `.hide()`'d — see `hideAllApps()`). Cross-process AX, so call
+    /// off-main; a short messaging timeout keeps a wedged Finder from stalling.
+    private static func setFinderWindowsMinimized(_ minimized: Bool, pid: pid_t) {
+        let axApp = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(axApp, 0.25)
+        var windowsValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+              let windows = windowsValue as? [AXUIElement] else { return }
+        let value: CFBoolean = minimized ? kCFBooleanTrue : kCFBooleanFalse
+        for window in windows {
+            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, value)
         }
     }
 

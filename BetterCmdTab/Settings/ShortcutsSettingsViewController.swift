@@ -181,7 +181,7 @@ final class ShortcutsSettingsViewController: SettingsTabViewController {
     /// reports how many apps are excluded from Hide all windows.
     private static func excludedHideDescription(_ count: Int) -> String {
         if count == 0 {
-            return String(localized: "Hide all windows hides every app except Finder. Pick apps to keep visible.")
+            return String(localized: "Hide all windows hides every app, Finder included. Pick apps to keep visible.")
         }
         return String(localized: "Apps kept visible: \(count).")
     }
