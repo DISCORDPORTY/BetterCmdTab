@@ -2326,7 +2326,13 @@ final class SwitcherController: SwitcherViewDelegate {
     /// (the current window), mirroring the default selection `reveal()` lands on
     /// when the panel actually shows. nil if no windowed rows are catalogued yet.
     private func primedWindowMRUTargetRow() -> SwitcherRow? {
-        let sorted = applyWindowMRUSort(cache.rows(orderedBy: mru.order))
+        // Signposted so the fast tap-release sort cost can be read in Instruments
+        // (Points of Interest, category "reveal"); near-zero when not recording.
+        // Reuses `applyWindowMRUSort` deliberately so the row a fast tap activates
+        // is byte-identical to the one a held-open panel would select.
+        let sorted = Log.reveal.withIntervalSignpost("primed.windowMRU") {
+            applyWindowMRUSort(cache.rows(orderedBy: mru.order))
+        }
         guard !sorted.isEmpty else { return nil }
         let idx = ((primedStepDelta % sorted.count) + sorted.count) % sorted.count
         return sorted[idx]
