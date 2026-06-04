@@ -2009,7 +2009,20 @@ final class SwitcherController: SwitcherViewDelegate {
             let l = $0.element.pid ?? 0, r = $1.element.pid ?? 0
             return l != r ? l < r : $0.offset < $1.offset
         }.map(\.element)
-        return CatalogFilter.pinnedToFront(windowMRU.sortRowsGlobally(stable), Preferences.shared.pinnedBundleIDs)
+        // The recency sort interleaves windows of hidden/windowless apps among the
+        // active ones, discarding the status bucketing the default `.mru` sort
+        // applies. Re-apply it as a STABLE sort so hidden/windowless/minimized rows
+        // sink to the end (matching `.mru` and the rest of the app) while recency
+        // order is preserved within each bucket. Then re-pin.
+        let ranked = windowMRU.sortRowsGlobally(stable)
+        let bucketed = ranked.enumerated()
+            .sorted { lhs, rhs in
+                let lp = AppCatalogCache.statusPriority(lhs.element)
+                let rp = AppCatalogCache.statusPriority(rhs.element)
+                return lp != rp ? lp < rp : lhs.offset < rhs.offset
+            }
+            .map(\.element)
+        return CatalogFilter.pinnedToFront(bucketed, Preferences.shared.pinnedBundleIDs)
     }
 
     private func applyFullSnapshot(_ fresh: [SwitcherRow], anchorPid: pid_t?) {

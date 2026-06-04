@@ -71,6 +71,12 @@ final class AppCatalogCache {
         kAXWindowMiniaturizedNotification as String,
         kAXWindowDeminiaturizedNotification as String,
         kAXFocusedWindowChangedNotification as String,
+        // Native window tabs (Finder/Safari/Terminal/…): switching a tab manually
+        // makes that tab's window frontmost. Some apps post only main-window-
+        // changed (not focused-window-changed) for that, so subscribe both and
+        // route them the same — otherwise a manual native-tab switch wouldn't
+        // re-order the switcher's window MRU.
+        kAXMainWindowChangedNotification as String,
         kAXTitleChangedNotification as String,
         kAXApplicationHiddenNotification as String,
         kAXApplicationShownNotification as String,
@@ -148,7 +154,10 @@ final class AppCatalogCache {
         return CatalogFilter.filteredRows(sorted, CatalogFilter.config())
     }
 
-    private static func statusPriority(_ row: SwitcherRow) -> Int {
+    /// Internal (not private) so the `.mruWindows` window-recency sort can
+    /// re-apply the same bucketing after its global shuffle (hidden/windowless
+    /// apps must still sink to the end).
+    static func statusPriority(_ row: SwitcherRow) -> Int {
         // Windowless and hidden regular apps share one "inactive" bucket after
         // everything else — they're least immediately actionable. They're
         // pooled together because an app closing its last window can flip
@@ -330,7 +339,10 @@ final class AppCatalogCache {
             // re-enumeration. Every set-changing notification (create/destroy/
             // miniaturize/hide/...) still triggers the full scan.
             let kind: AXNoteKind
-            if CFEqual(notification, kAXFocusedWindowChangedNotification as CFString) {
+            if CFEqual(notification, kAXFocusedWindowChangedNotification as CFString)
+                || CFEqual(notification, kAXMainWindowChangedNotification as CFString) {
+                // Both just reorder existing windows (a native-tab switch makes a
+                // different window frontmost) — a cheap MRU nudge, not a re-scan.
                 kind = .focus
             } else if CFEqual(notification, kAXTitleChangedNotification as CFString) {
                 // Title churn is by far the loudest notification; while the panel
