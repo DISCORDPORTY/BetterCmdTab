@@ -275,15 +275,14 @@ struct SwitcherRow {
         return windowTitle.isEmpty ? appName : windowTitle
     }
 
-    /// The window-title portion only — empty when the row would otherwise fall back
-    /// to the app name (windowless apps, placeholders, untitled windows). Used by the
-    /// "Show application names" = off path so hiding names never re-surfaces the app
-    /// name as a title. Mirrors `displayTitle`'s branches but never returns `appName`.
+    /// The window-title portion only — falls back to `appName` when the window title
+    /// is empty (e.g. PWAs whose AX title is blank). Used by the "Show application
+    /// names" = off path. Windowless rows and placeholders still return "".
     var windowTitleText: String {
         if isPlaceholder { return "" }
         if case .recentlyClosed(let entry) = subject { return entry.title }
         if window == nil { return "" }
-        return windowTitle
+        return windowTitle.isEmpty ? appName : windowTitle
     }
 }
 
