@@ -108,6 +108,10 @@ final class SwitcherController: SwitcherViewDelegate {
     /// highlighted row and not a live `frontmostApplication` read (which returns
     /// BetterCmdTab once our key panel is on screen). Cleared on teardown.
     private var openFocusedWindow: AXUIElement?
+    /// Screen of the window focused when the switcher opened, resolved off-main
+    /// for `.activeWindow` display mode (#22). nil for other modes or until the
+    /// async read lands. Cleared on teardown with `openFocusedWindow`.
+    private var openTargetScreen: NSScreen?
     /// The app that was frontmost when the switcher opened. On open we activate
     /// BetterCmdTab so the WindowServer renders the Liquid Glass backdrop as
     /// active (an `.accessory`/non-activating app's in-process `appearsActive`
@@ -275,6 +279,9 @@ final class SwitcherController: SwitcherViewDelegate {
     /// (overlapping the reveal delay) so `reveal()` doesn't block its critical
     /// path on the synchronous AX read. Consumed and cleared by `reveal()`.
     private var prefetchedFocusedWindow: AXUIElement?
+    /// `.activeWindow` target screen resolved during the primed prefetch, copied
+    /// into `openTargetScreen` by `reveal()` (mirrors `prefetchedFocusedWindow`).
+    private var prefetchedTargetScreen: NSScreen?
     /// Token bumped per primed chord so a stale off-main focused-window capture
     /// from an earlier chord can't land on a newer one.
     private var focusedWindowCaptureGen: UInt64 = 0
@@ -408,7 +415,9 @@ final class SwitcherController: SwitcherViewDelegate {
         // `baseRows`, not `rows`: in fuzzy-search mode an empty filtered result
         // is still a visible panel that must track screen changes.
         guard phase == .visible, !baseRows.isEmpty else { return }
-        currentMetrics = SwitcherMetrics.forScreen(SwitcherPanel.preferredScreen(), layoutMode: Preferences.shared.switcherLayoutMode, userScale: Preferences.shared.panelSize.scale, letterHints: Preferences.shared.letterHintsEnabled, showAppNames: Preferences.shared.showApplicationNames, showWindowTitles: Preferences.shared.showWindowTitleLabel, hoverActionCount: Preferences.shared.enabledHoverActionCount, browserTabsExpanded: Preferences.shared.expandBrowserTabsAsWindows && !Preferences.shared.applicationsOnly)
+        let sessionScreen = resolveSessionScreen()
+        panel.targetScreen = sessionScreen
+        currentMetrics = SwitcherMetrics.forScreen(sessionScreen, layoutMode: Preferences.shared.switcherLayoutMode, userScale: Preferences.shared.panelSize.scale, letterHints: Preferences.shared.letterHintsEnabled, showAppNames: Preferences.shared.showApplicationNames, showWindowTitles: Preferences.shared.showWindowTitleLabel, hoverActionCount: Preferences.shared.enabledHoverActionCount, browserTabsExpanded: Preferences.shared.expandBrowserTabsAsWindows && !Preferences.shared.applicationsOnly)
         refreshDisplay()
     }
 
@@ -1751,6 +1760,31 @@ final class SwitcherController: SwitcherViewDelegate {
         revealTimer = timer
     }
 
+    /// The one screen this open session uses for positioning AND metrics, so the
+    /// two never disagree. Mouse/main resolve live; active-window uses the
+    /// off-main capture (`openTargetScreen`) with the panel's fallback chain.
+    private func resolveSessionScreen() -> NSScreen {
+        SwitcherPanel.preferredScreen(
+            mode: Preferences.shared.switcherDisplayMode,
+            activeWindowScreen: openTargetScreen
+        )
+    }
+
+    /// Convert AX (top-left) window bounds to Cocoa and pick the max-overlap
+    /// screen. Main-actor only (`NSScreen.screens`). nil if no screen overlaps.
+    private func screen(forAXBounds ax: CGRect) -> NSScreen? {
+        guard let primaryMaxY = NSScreen.screens.first?.frame.maxY else { return nil }
+        let cocoa = CGRect(
+            x: ax.minX,
+            y: primaryMaxY - ax.minY - ax.height,
+            width: ax.width,
+            height: ax.height
+        )
+        let frames = NSScreen.screens.map(\.frame)
+        guard let i = ScreenSelection.indexOfMaxOverlap(rect: cocoa, screenFrames: frames) else { return nil }
+        return NSScreen.screens[i]
+    }
+
     /// Resolve the frontmost app's focused window off the main thread during the
     /// primed phase so the work overlaps the reveal delay instead of stalling
     /// `reveal()`. `openFocusedWindow` is what window-management chords act on
@@ -1761,14 +1795,17 @@ final class SwitcherController: SwitcherViewDelegate {
     /// skips the primed timer).
     private func prefetchOpenFocusedWindow() {
         prefetchedFocusedWindow = nil
+        prefetchedTargetScreen = nil
         let selfPid = getpid()
         guard let front = NSWorkspace.shared.frontmostApplication,
               front.processIdentifier != selfPid else { return }
         let pid = front.processIdentifier
+        let wantScreen = Preferences.shared.switcherDisplayMode == .activeWindow
         focusedWindowCaptureGen &+= 1
         let gen = focusedWindowCaptureGen
         DispatchQueue.global(qos: .userInteractive).async {
             let window = Activator.focusedWindow(pid: pid)
+            let axBounds = (wantScreen && window != nil) ? Activator.axBounds(of: window!) : nil
             DispatchQueue.main.async { [weak self] in
                 // `.primed` only: reveal() consumes + nils this and flips to
                 // `.visible`, so a landing after reveal (or after a cancel to
@@ -1777,6 +1814,7 @@ final class SwitcherController: SwitcherViewDelegate {
                 // skip the primed prefetch) would adopt.
                 guard let self, gen == self.focusedWindowCaptureGen, self.phase == .primed else { return }
                 self.prefetchedFocusedWindow = window
+                if let axBounds { self.prefetchedTargetScreen = self.screen(forAXBounds: axBounds) }
             }
         }
     }
@@ -1813,15 +1851,20 @@ final class SwitcherController: SwitcherViewDelegate {
         // above, before `panel.present()` makes our key panel frontmost.
         openFocusedWindow = prefetchedFocusedWindow
         prefetchedFocusedWindow = nil
+        openTargetScreen = prefetchedTargetScreen
+        prefetchedTargetScreen = nil
         if openFocusedWindow == nil, let pid = front?.processIdentifier, pid != getpid() {
+            let wantScreen = Preferences.shared.switcherDisplayMode == .activeWindow
             focusedWindowCaptureGen &+= 1
             let gen = focusedWindowCaptureGen
             DispatchQueue.global(qos: .userInteractive).async {
                 let window = Activator.focusedWindow(pid: pid)
+                let axBounds = (wantScreen && window != nil) ? Activator.axBounds(of: window!) : nil
                 DispatchQueue.main.async { [weak self] in
                     guard let self, gen == self.focusedWindowCaptureGen,
                           self.phase == .visible, self.openFocusedWindow == nil else { return }
                     self.openFocusedWindow = window
+                    if let axBounds { self.openTargetScreen = self.screen(forAXBounds: axBounds) }
                 }
             }
         }
@@ -1909,7 +1952,9 @@ final class SwitcherController: SwitcherViewDelegate {
         }
         guard !rows.isEmpty else { cancel(); return }
 
-        currentMetrics = SwitcherMetrics.forScreen(SwitcherPanel.preferredScreen(), layoutMode: Preferences.shared.switcherLayoutMode, userScale: Preferences.shared.panelSize.scale, letterHints: Preferences.shared.letterHintsEnabled, showAppNames: Preferences.shared.showApplicationNames, showWindowTitles: Preferences.shared.showWindowTitleLabel, hoverActionCount: Preferences.shared.enabledHoverActionCount, browserTabsExpanded: Preferences.shared.expandBrowserTabsAsWindows && !Preferences.shared.applicationsOnly)
+        let sessionScreen = resolveSessionScreen()
+        panel.targetScreen = sessionScreen
+        currentMetrics = SwitcherMetrics.forScreen(sessionScreen, layoutMode: Preferences.shared.switcherLayoutMode, userScale: Preferences.shared.panelSize.scale, letterHints: Preferences.shared.letterHintsEnabled, showAppNames: Preferences.shared.showApplicationNames, showWindowTitles: Preferences.shared.showWindowTitleLabel, hoverActionCount: Preferences.shared.enabledHoverActionCount, browserTabsExpanded: Preferences.shared.expandBrowserTabsAsWindows && !Preferences.shared.applicationsOnly)
         view.configure(rows: rows, labels: displayLabels, selectedIndex: index, metrics: currentMetrics, highlightPrefix: letterBuffer)
         panel.present()
         phase = .visible
@@ -2002,7 +2047,9 @@ final class SwitcherController: SwitcherViewDelegate {
         let delta = windowsOnlyPrimedDelta
         index = count > 0 ? ((delta % count) + count) % count : 0
 
-        currentMetrics = SwitcherMetrics.forScreen(SwitcherPanel.preferredScreen(), layoutMode: Preferences.shared.switcherLayoutMode, userScale: Preferences.shared.panelSize.scale, letterHints: Preferences.shared.letterHintsEnabled, showAppNames: Preferences.shared.showApplicationNames, showWindowTitles: Preferences.shared.showWindowTitleLabel, hoverActionCount: Preferences.shared.enabledHoverActionCount, browserTabsExpanded: Preferences.shared.expandBrowserTabsAsWindows && !Preferences.shared.applicationsOnly)
+        let sessionScreen = resolveSessionScreen()
+        panel.targetScreen = sessionScreen
+        currentMetrics = SwitcherMetrics.forScreen(sessionScreen, layoutMode: Preferences.shared.switcherLayoutMode, userScale: Preferences.shared.panelSize.scale, letterHints: Preferences.shared.letterHintsEnabled, showAppNames: Preferences.shared.showApplicationNames, showWindowTitles: Preferences.shared.showWindowTitleLabel, hoverActionCount: Preferences.shared.enabledHoverActionCount, browserTabsExpanded: Preferences.shared.expandBrowserTabsAsWindows && !Preferences.shared.applicationsOnly)
         view.configure(rows: rows, labels: displayLabels, selectedIndex: index, metrics: currentMetrics, highlightPrefix: letterBuffer)
         panel.present()
         phase = .visible
@@ -2566,6 +2613,7 @@ final class SwitcherController: SwitcherViewDelegate {
         // session and be adopted by a gesture/scoped open that skips the primed
         // prefetch (those call reveal() directly).
         prefetchedFocusedWindow = nil
+        prefetchedTargetScreen = nil
         // We picked a target — `pendingActivation` activates it, so there's
         // nothing to restore. Drop the captured previous app.
         previousFrontmostApp = nil
@@ -2607,6 +2655,8 @@ final class SwitcherController: SwitcherViewDelegate {
         resetSearch()
         openFocusedWindow = nil
         prefetchedFocusedWindow = nil
+        openTargetScreen = nil
+        prefetchedTargetScreen = nil
         view.releaseIdleResources()
         // Dismissing without picking: undo the self-activation `present()` did for
         // the glass backdrop and put the user back in the app they came from.
