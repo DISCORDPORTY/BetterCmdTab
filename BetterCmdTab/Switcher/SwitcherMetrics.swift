@@ -148,13 +148,19 @@ struct SwitcherMetrics: Equatable {
             : round(baseRowWidth * scale)
 
         // The grid tile stacks the app name over a secondary line (window title +
-        // status glyphs). Both lines are needed only when both labels are shown;
-        // hiding either one collapses the label area to a single slim row, dropping
-        // the freed line's height. The item view rides the surviving label (title or
-        // app name) on the secondary line with the glyphs, so nothing is lost.
-        let tileLabelAreaH = (layoutMode == .gridView && !(showAppNames && showWindowTitles))
-            ? round(baseTileCompactLabelArea * scale)
-            : round(baseTileLabelArea * scale)
+        // status glyphs). Two lines are needed only when both labels are shown;
+        // hiding one collapses the area to a single slim row (the surviving label
+        // rides the secondary line with the glyphs, losing nothing), and hiding both
+        // drops the area entirely for a bare icon-only tile — the status glyphs go
+        // with it. Either way the tile shrinks by the freed height.
+        let tileLabelAreaH: CGFloat
+        if layoutMode == .gridView, !showAppNames, !showWindowTitles {
+            tileLabelAreaH = 0
+        } else if layoutMode == .gridView, !(showAppNames && showWindowTitles) {
+            tileLabelAreaH = round(baseTileCompactLabelArea * scale)
+        } else {
+            tileLabelAreaH = round(baseTileLabelArea * scale)
+        }
 
         // Preview tiles carry a single label row: small app icon + window title.
         // The app-name toggle never adds text here (the icon stands in for the app),

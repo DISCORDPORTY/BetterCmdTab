@@ -36,7 +36,7 @@ struct SwitcherMetricsTests {
         #expect(shown.tileSize == hidden.tileSize)
     }
 
-    @Test("grid tile label area collapses whenever either label is hidden")
+    @Test("grid tile label area: full → compact when one hidden → zero when both hidden")
     func gridCompactLabelArea() {
         let full = SwitcherMetrics.forScale(1.0, layoutMode: .gridView, showAppNames: true, showWindowTitles: true)
         let nameOff = SwitcherMetrics.forScale(1.0, layoutMode: .gridView, showAppNames: false, showWindowTitles: true)
@@ -44,11 +44,12 @@ struct SwitcherMetricsTests {
         let bothOff = SwitcherMetrics.forScale(1.0, layoutMode: .gridView, showAppNames: false, showWindowTitles: false)
         // Two stacked lines only when both labels are shown.
         #expect(full.tileLabelArea == SwitcherMetrics.baseTileLabelArea)
-        // Hiding either label drops a line; the surviving label + status glyphs ride
-        // a single slim row, so the tile shrinks by the hidden line's height.
+        // Hiding one label drops a line; the surviving label + glyphs ride a single
+        // slim row.
         #expect(nameOff.tileLabelArea == SwitcherMetrics.baseTileCompactLabelArea)
         #expect(titleOff.tileLabelArea == SwitcherMetrics.baseTileCompactLabelArea)
-        #expect(bothOff.tileLabelArea == SwitcherMetrics.baseTileCompactLabelArea)
+        // Hiding both drops the label area entirely → bare icon-only tile.
+        #expect(bothOff.tileLabelArea == 0)
     }
 
     @Test("hidden app names reserve a list column for the hover action bar")
@@ -91,12 +92,12 @@ struct SwitcherMetricsTests {
             showAppNames: false, showWindowTitles: false, browserTabsExpanded: true)
         #expect(bothOffExpanded.previewLabelArea == SwitcherMetrics.basePreviewLabelArea)
 
-        // Expansion only matters for the both-off preview case; it must not change
-        // the collapsed grid label area or the list row width.
+        // Expansion only matters for the both-off preview case; grid ignores it and
+        // still drops its label area to zero (icon-only) when both labels are hidden.
         let grid = SwitcherMetrics.forScale(
             1.0, layoutMode: .gridView,
             showAppNames: false, showWindowTitles: false, browserTabsExpanded: true)
-        #expect(grid.tileLabelArea == SwitcherMetrics.baseTileCompactLabelArea)
+        #expect(grid.tileLabelArea == 0)
     }
 
     @Test("scale clamps high values to 1.8")

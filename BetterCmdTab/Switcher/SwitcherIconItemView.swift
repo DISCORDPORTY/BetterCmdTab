@@ -206,20 +206,27 @@ final class SwitcherIconItemView: NSView, SwitcherItemViewProtocol {
         let isDialog = row.isSystemDialog
         let showNames = Preferences.shared.showApplicationNames
         let showTitles = Preferences.shared.showWindowTitleLabel
+        // Both labels hidden → bare icon-only tile: the metrics drop the label area to
+        // zero, so the name/title lines and the status glyphs are all dropped.
+        let bothHidden = !showNames && !showTitles
 
         // Status glyphs ride with the secondary text instead of crowding the icon.
         // Audio is orthogonal, so it shows alongside the window-state glyph (e.g. a
         // windowless app playing sound gets both speaker + no-window). Launch/reopen
         // rows return their single cue, never a stacked no-window glyph.
-        let indicators = isDialog ? [] : Self.indicators(for: row)
+        let indicators = (isDialog || bothHidden) ? [] : Self.indicators(for: row)
 
         // The label area stacks the app name over a secondary line (glyphs + window
-        // title) only when BOTH labels are shown. Hiding either one collapses the
-        // tile to a single compact line — the metrics drop the freed line's height —
-        // and the surviving label rides the secondary line together with the glyphs,
-        // so no information is lost and the tile shrinks by exactly the hidden line.
+        // title) only when BOTH labels are shown. Hiding one collapses the tile to a
+        // single compact line carrying the surviving label + glyphs; hiding both drops
+        // the label area entirely. Either way the tile shrinks by the freed height.
         let secondaryLine: String
-        if showNames && showTitles {
+        if bothHidden {
+            // Icon-only: no name, no title, no glyphs.
+            nameLabel.stringValue = ""
+            nameLabel.isHidden = true
+            secondaryLine = ""
+        } else if showNames && showTitles {
             // Two lines: app name on top, glyphs + window title below.
             let nameText = isDialog
                 ? (row.windowTitle.isEmpty ? row.appName : row.windowTitle)
@@ -237,10 +244,8 @@ final class SwitcherIconItemView: NSView, SwitcherItemViewProtocol {
                 secondaryLine = row.windowTitle.isEmpty ? row.appName : row.windowTitle
             } else if showTitles {
                 secondaryLine = Self.secondaryText(for: row, showTitle: true)
-            } else if showNames {
-                secondaryLine = row.appName
             } else {
-                secondaryLine = Self.secondaryText(for: row, showTitle: false)
+                secondaryLine = row.appName
             }
         }
 
