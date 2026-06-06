@@ -192,7 +192,7 @@ final class SwitcherSettingsViewController: SettingsTabViewController {
                accessory: clickDismissSwitch, searchItemID: SearchID.clickDismiss)
         configureSwitch(vimNavSwitch, action: #selector(toggleVimNavigation(_:)))
         addRow(to: navigation, title: String(localized: "Vim keys (h j k l)"),
-               subtitle: String(localized: "Use h / j / k / l like the arrow keys while the switcher is open. h and j/k override the default Hide and letter-jump bindings; search mode still types those letters."),
+               subtitle: String(localized: "Use h / j / k / l like the arrow keys while the switcher is open. h overrides the Hide binding and j / k / l override letter-jump; search mode still types those letters."),
                accessory: vimNavSwitch, searchItemID: SearchID.vimNavigation)
 
         // Hover actions section — buttons revealed on a row under the pointer.

@@ -54,4 +54,41 @@ struct HotkeyTapVimNavigationTests {
                     "\(character) should not be a vim navigation key")
         }
     }
+
+    /// While vim is on, h/j/k/l must be reserved on top of the bound action
+    /// letters so `RowLabels` never hands out a hint the tap would silently
+    /// swallow as motion. With vim off the bound set passes through untouched.
+    @Test func reservedSetUnionsVimLettersWhenEnabled() {
+        let bound: Set<Character> = ["w", "m", "h", "q", "f"]
+        #expect(HotkeyTap.reservedSet(boundLetters: bound, vimEnabled: false) == bound)
+        let on = HotkeyTap.reservedSet(boundLetters: bound, vimEnabled: true)
+        #expect(on == bound.union(["j", "k", "l"]))   // j/k/l were the missing ones
+        #expect(on.isSuperset(of: HotkeyTap.vimNavigationLetters))
+    }
+
+    /// Hide rebound off `h` (e.g. to `x`): vim must still reserve every one of
+    /// h/j/k/l, so none of them can leak out as a letter-jump hint.
+    @Test func reservedSetReservesAllVimLettersEvenWhenHideRebound() {
+        let bound: Set<Character> = ["w", "m", "x", "q", "f"]
+        let on = HotkeyTap.reservedSet(boundLetters: bound, vimEnabled: true)
+        #expect(on.isSuperset(of: ["h", "j", "k", "l"]))
+    }
+
+    /// The actual bug PR #24 shipped with: toggling vim must re-derive the
+    /// reserved-letter set and re-push it to the hint generator, not merely flip
+    /// an internal flag. Drive it through the public API and capture what gets
+    /// pushed via `onReservedLettersChanged`. (A fresh tap has no bound action
+    /// keys, so the reserved set is exactly the vim union when on and empty when
+    /// off.)
+    @Test func togglingVimRepushesReservedLetters() {
+        let tap = HotkeyTap()
+        var pushed: Set<Character>?
+        tap.onReservedLettersChanged = { pushed = $0 }
+
+        tap.setVimNavigationEnabled(true)
+        #expect(pushed?.isSuperset(of: HotkeyTap.vimNavigationLetters) == true)
+
+        tap.setVimNavigationEnabled(false)
+        #expect(pushed?.isDisjoint(with: ["j", "k", "l"]) == true)
+    }
 }

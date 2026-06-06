@@ -863,7 +863,8 @@ final class SwitcherController: SwitcherViewDelegate {
             holdModifierDown: holdMonitor.isHeld,
             searchActive: searchActive,
             tabDrillActive: tabDrillActive,
-            panelActions: panelActionSpecs()
+            panelActions: panelActionSpecs(),
+            vimNavigationEnabled: Preferences.shared.vimNavigationEnabled
         )
         applyOverridePlan(plan)
     }
