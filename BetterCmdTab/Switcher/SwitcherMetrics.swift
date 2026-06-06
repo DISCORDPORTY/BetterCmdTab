@@ -155,14 +155,16 @@ struct SwitcherMetrics: Equatable {
             ? round(baseTileCompactLabelArea * scale)
             : round(baseTileLabelArea * scale)
 
-        // Preview tiles have a single label row (small app icon + window title).
-        // With both hidden there's nothing textual left, so drop the row entirely
-        // and let the tile be thumbnail-only and shorter. Exception: when browser
-        // tabs are expanded as windows, every tab tile shares the parent app icon
-        // and thumbnail, so the tab title is the *only* thing distinguishing
-        // siblings — keep the band (uniformly, so tile heights stay aligned) even
-        // when both labels are otherwise hidden.
-        let previewLabelAreaH = (layoutMode == .windowPreview && bothLabelsHidden && !browserTabsExpanded)
+        // Preview tiles carry a single label row: small app icon + window title.
+        // The app-name toggle never adds text here (the icon stands in for the app),
+        // so the only thing the band shows is the window title. When the title is
+        // hidden, drop the band entirely — symmetric to letterHints collapsing the
+        // top letter strip — so the tile is thumbnail-only and shorter, reclaiming
+        // the bottom space. Exception: when browser tabs are expanded as windows,
+        // every tab tile shares the parent app icon and thumbnail, so the tab title
+        // is the *only* sibling distinguisher — keep the band (uniformly, so tile
+        // heights stay aligned) even with the title otherwise hidden.
+        let previewLabelAreaH = (layoutMode == .windowPreview && !showWindowTitles && !browserTabsExpanded)
             ? 0
             : round(basePreviewLabelArea * scale)
 

@@ -62,15 +62,18 @@ struct SwitcherMetricsTests {
         #expect(many.rowWidth == SwitcherMetrics.baseRowWidth - SwitcherMetrics.baseAppNameWidth + expected)
     }
 
-    @Test("preview label area collapses to 0 only when both name and title are hidden")
+    @Test("preview label area collapses to 0 whenever the window title is hidden")
     func previewLabelAreaCollapse() {
         let full = SwitcherMetrics.forScale(1.0, layoutMode: .windowPreview, showAppNames: true, showWindowTitles: true)
         let nameOff = SwitcherMetrics.forScale(1.0, layoutMode: .windowPreview, showAppNames: false, showWindowTitles: true)
         let titleOff = SwitcherMetrics.forScale(1.0, layoutMode: .windowPreview, showAppNames: true, showWindowTitles: false)
         let bothOff = SwitcherMetrics.forScale(1.0, layoutMode: .windowPreview, showAppNames: false, showWindowTitles: false)
         #expect(full.previewLabelArea == SwitcherMetrics.basePreviewLabelArea)
-        #expect(nameOff.previewLabelArea == SwitcherMetrics.basePreviewLabelArea)   // title still shown
-        #expect(titleOff.previewLabelArea == SwitcherMetrics.basePreviewLabelArea)  // name still shown
+        #expect(nameOff.previewLabelArea == SwitcherMetrics.basePreviewLabelArea)   // title shown → keep the band
+        // The preview band only ever shows the window title (the app icon is
+        // decorative), so hiding the title reclaims the band regardless of the
+        // app-name toggle — symmetric to letterHints collapsing the top strip.
+        #expect(titleOff.previewLabelArea == 0)
         #expect(bothOff.previewLabelArea == 0)
     }
 
