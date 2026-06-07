@@ -1798,7 +1798,9 @@ final class SwitcherController: SwitcherViewDelegate {
         // The AX↔Cocoa flip is anchored to the "Main display". `NSScreen.screens`
         // order is not guaranteed primary-first, so resolve it by origin (mirrors
         // `mainDisplayScreen()` / `cgGlobalFrame`) — using `screens.first` here
-        // would flip against the wrong height when displays are reordered.
+        // would flip against the wrong height when displays are reordered. The
+        // `?? screens.first` is an unreachable default (a live system always has
+        // an origin-zero display); an empty `screens` yields nil and bails.
         guard let primaryMaxY = (screens.first(where: { $0.frame.origin == .zero })
             ?? screens.first)?.frame.maxY else { return nil }
         let cocoa = ScreenSelection.cocoaRect(forAXBounds: ax, primaryMaxY: primaryMaxY)

@@ -28,10 +28,11 @@ enum ScreenSelection {
 
     /// Flip a rect from Accessibility coordinates (top-left origin of the primary
     /// display, y-down) into Cocoa coordinates (bottom-left origin, y-up).
-    /// `primaryMaxY` is the primary ("Main display") height; both spaces are
-    /// anchored to that screen's corner, so this one flip is correct for windows
-    /// on every display — including secondaries above/below (Cocoa y past the
-    /// primary's range) or to the left (negative x, carried through unchanged).
+    /// `primaryMaxY` is the primary ("Main display") height — pass the origin-zero
+    /// screen's `frame.maxY`, which equals its height since its `minY` is 0. Both
+    /// spaces are anchored to that screen's corner, so this one flip is correct
+    /// for windows on every display — including secondaries above/below (Cocoa y
+    /// past the primary's range) or to the left (negative x, carried unchanged).
     static func cocoaRect(forAXBounds ax: CGRect, primaryMaxY: CGFloat) -> CGRect {
         CGRect(
             x: ax.minX,
