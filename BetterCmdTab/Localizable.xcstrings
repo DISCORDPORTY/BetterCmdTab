@@ -7577,6 +7577,62 @@
         }
       }
     },
+    "This file isn't a valid BetterCmdTab settings export." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diese Datei ist kein gültiger BetterCmdTab-Einstellungsexport."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Este archivo no es una exportación de ajustes de BetterCmdTab válida."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ce fichier n'est pas un export de réglages BetterCmdTab valide."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ten plik nie jest prawidłowym eksportem ustawień BetterCmdTab."
+          }
+        }
+      }
+    },
+    "This settings file uses a newer format (version %lld) than this version of BetterCmdTab can read. Update the app and try again." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diese Einstellungsdatei verwendet ein neueres Format (Version %lld), als diese Version von BetterCmdTab lesen kann. Aktualisiere die App und versuche es erneut."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Este archivo de ajustes usa un formato más reciente (versión %lld) del que esta versión de BetterCmdTab puede leer. Actualiza la app e inténtalo de nuevo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ce fichier de réglages utilise un format plus récent (version %lld) que celui que cette version de BetterCmdTab peut lire. Mettez l'app à jour et réessayez."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ten plik ustawień używa nowszego formatu (wersja %lld), niż potrafi odczytać ta wersja BetterCmdTab. Zaktualizuj aplikację i spróbuj ponownie."
+          }
+        }
+      }
+    },
     "Three-finger swipe" : {
       "localizations" : {
         "de" : {
