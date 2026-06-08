@@ -45,9 +45,9 @@ extension Preferences {
         var errorDescription: String? {
             switch self {
             case .malformed:
-                return "This file isn't a valid BetterCmdTab settings export."
+                return String(localized: "This file isn't a valid BetterCmdTab settings export.")
             case .unsupportedVersion(let v):
-                return "This settings file uses a newer format (version \(v)) than this version of BetterCmdTab can read. Update the app and try again."
+                return String(localized: "This settings file uses a newer format (version \(v)) than this version of BetterCmdTab can read. Update the app and try again.")
             }
         }
     }
